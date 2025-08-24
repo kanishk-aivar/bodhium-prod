@@ -131,6 +131,7 @@ def lambda_handler(event, context):
         url = None
         job_id = None
         brand_name = None
+        max_urls = None
         
         # Parse input to get job_id if provided
         if 'body' in event:
@@ -141,6 +142,7 @@ def lambda_handler(event, context):
                 url = body.get('url')
                 job_id = body.get('job_id')
                 brand_name = body.get('brand_name')
+                max_urls = body.get('max_urls', '100')  # Default to 100 if not specified
             except (json.JSONDecodeError, AttributeError):
                 pass
         
@@ -148,11 +150,13 @@ def lambda_handler(event, context):
             url = event['queryStringParameters'].get('url')
             job_id = event['queryStringParameters'].get('job_id')
             brand_name = event['queryStringParameters'].get('brand_name')
+            max_urls = event['queryStringParameters'].get('max_urls', '100')
         
         if not url and 'url' in event:
             url = event['url']
             job_id = event.get('job_id')
             brand_name = event.get('brand_name')
+            max_urls = event.get('max_urls', '100')
         
         # Generate job_id if not provided
         if not job_id:
@@ -161,6 +165,16 @@ def lambda_handler(event, context):
         else:
             logger.info(f"Using provided job_id: {job_id}")
         
+        # Validate max_urls
+        try:
+            max_urls = int(max_urls) if max_urls else 100
+            if max_urls <= 0 or max_urls > 10000:
+                max_urls = 100
+                logger.warning(f"Invalid max_urls value, using default: 100")
+        except (ValueError, TypeError):
+            max_urls = 100
+            logger.warning(f"Invalid max_urls value, using default: 100")
+        
         # Create initial job record
         create_or_update_scrape_job(job_id, url, "PENDING", brand_name)
         
@@ -168,7 +182,8 @@ def lambda_handler(event, context):
             "lambda_function": context.function_name if context else "unknown",
             "request_id": context.aws_request_id if context else "unknown",
             "timestamp": datetime.now().isoformat(),
-            "job_id_source": "provided" if 'job_id' in locals() and job_id else "generated"
+            "job_id_source": "provided" if 'job_id' in locals() and job_id else "generated",
+            "max_urls": max_urls
         }, job_id)
         
         if not url:
@@ -187,7 +202,7 @@ def lambda_handler(event, context):
         # Get configuration from environment variables
         batch_job_queue = os.environ.get('BATCH_JOB_QUEUE')
         batch_job_definition = os.environ.get('BATCH_JOB_DEFINITION')
-        batch_job_name_prefix = os.environ.get('BATCH_JOB_NAME_PREFIX', 'bodhium-scrapper')
+        batch_job_name_prefix = os.environ.get('BATCH_JOB_NAME_PREFIX', 'bodhium-scraper')
         
         if not batch_job_queue or not batch_job_definition:
             return {
@@ -199,26 +214,70 @@ def lambda_handler(event, context):
                 })
             }
         
-        # Generate a unique job name (keeping hash for job name as it needs to be unique)
+        # Generate a unique job name
         timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
         unique_id = str(uuid.uuid4())[:8]
         job_name = f"{batch_job_name_prefix}-{timestamp}-{unique_id}"
         
+        # Get RDS credentials from Secrets Manager for the batch job
+        try:
+            rds_secret = get_secret()
+            rds_host = rds_secret['DB_HOST']
+            rds_database = rds_secret['DB_NAME']
+            rds_username = rds_secret['DB_USER']
+            rds_password = rds_secret['DB_PASSWORD']
+            rds_port = rds_secret['DB_PORT']
+        except Exception as e:
+            logger.error(f"Failed to get RDS credentials: {e}")
+            return {
+                'statusCode': 500,
+                'headers': {'Content-Type': 'application/json'},
+                'body': json.dumps({
+                    'status': 'error',
+                    'message': 'Failed to get database credentials'
+                })
+            }
+        
+        # Get Gemini API key from Secrets Manager
+        gemini_api_key = None
+        try:
+            gemini_secret_name = os.environ.get('GEMINI_SECRET_NAME', 'Gemini-API-ChatGPT')
+            gemini_secret = get_secret(gemini_secret_name)
+            gemini_api_key = gemini_secret.get('GEMINI_API_KEY') or gemini_secret.get('api_key')
+        except Exception as e:
+            logger.warning(f"Failed to get Gemini API key: {e}")
+        
         # Collect environment variables to pass to the batch job
         batch_env_vars = [
-            {'name': 'CRAWL_URL', 'value': url},
-            {'name': 'AWS_BATCH_JOB_ID', 'value': job_id},  # Pass job_id with correct env var name
-            {'name': 'BRAND_NAME', 'value': brand_name},  # Pass brand name to batch scraper
+            {'name': 'JOB_ID', 'value': job_id},
+            {'name': 'BRAND_NAME', 'value': brand_name or 'Unknown'},
+            {'name': 'SOURCE_URL', 'value': url},
+            {'name': 'MAX_URLS', 'value': str(max_urls)},
+            {'name': 'RDS_HOST', 'value': rds_host},
+            {'name': 'RDS_PORT', 'value': str(rds_port)},
+            {'name': 'RDS_DATABASE', 'value': rds_database},
+            {'name': 'RDS_USERNAME', 'value': rds_username},
+            {'name': 'RDS_PASSWORD', 'value': rds_password},
             {'name': 'AWS_REGION', 'value': os.environ.get('AWS_REGION', 'us-east-1')},
-            {'name': 'S3_BUCKET_NAME', 'value': os.environ.get('S3_BUCKET_NAME')},
-            {'name': 'S3_PATH', 'value': os.environ.get('S3_PATH')},
-            {'name': 'DYNAMODB_TABLE_NAME', 'value': os.environ.get('DYNAMODB_TABLE_NAME', 'OrchestrationLogs')},
-            {'name': 'GEMINI_SECRET_NAME', 'value': os.environ.get('GEMINI_SECRET_NAME', 'Gemini-API-ChatGPT')},
-            {'name': 'GEMINI_SECRET_REGION', 'value': os.environ.get('GEMINI_SECRET_REGION', 'us-east-1')}
+            {'name': 'MONITOR_INTERVAL', 'value': '5'},
+            {'name': 'SQLITE_DB_PATH', 'value': './scraper.db'}
         ]
+        
+        # Add Gemini API key if available
+        if gemini_api_key:
+            batch_env_vars.append({'name': 'GEMINI_API_KEY', 'value': gemini_api_key})
+        
+        # Add optional thread configuration
+        batch_env_vars.extend([
+            {'name': 'MAX_CRAWLER_THREADS', 'value': os.environ.get('MAX_CRAWLER_THREADS', '10')},
+            {'name': 'MAX_SCRAPER_THREADS', 'value': os.environ.get('MAX_SCRAPER_THREADS', '10')},
+            {'name': 'MAX_GEMINI_THREADS', 'value': os.environ.get('MAX_GEMINI_THREADS', '10')}
+        ])
         
         # Filter out None values
         batch_env_vars = [env for env in batch_env_vars if env['value'] is not None]
+        
+        logger.info(f"Submitting batch job with {len(batch_env_vars)} environment variables")
         
         # Submit the batch job
         batch_client = boto3.client('batch')
@@ -226,9 +285,14 @@ def lambda_handler(event, context):
             jobName=job_name,
             jobQueue=batch_job_queue,
             jobDefinition=batch_job_definition,
+            parameters={
+                'job_id': job_id,
+                'brand_name': brand_name or 'Unknown',
+                'source_url': url,
+                'max_urls': str(max_urls)
+            },
             containerOverrides={
-                'environment': batch_env_vars,
-                'command': ['python', 'app.py', '--url', url, '--job-id', job_id, '--brand-name', brand_name] if brand_name else ['python', 'app.py', '--url', url, '--job-id', job_id]
+                'environment': batch_env_vars
             }
         )
         
@@ -236,12 +300,14 @@ def lambda_handler(event, context):
         logger.info(f"Submitted batch job {job_name} with ID {batch_job_id} for URL: {url}")
         
         # Update job status to SUBMITTED
-        create_or_update_scrape_job(job_id, url, "SUBMITTED", brand_name)
+        create_or_update_scrape_job(job_id, url, "JOB_RUNNING", brand_name)
         
-        log_orchestration_event("JobSuccessful", {
+        log_orchestration_event("JobSubmitted", {
             "batch_job_id": batch_job_id,
             "batch_job_name": job_name,
             "url": url,
+            "brand_name": brand_name,
+            "max_urls": max_urls,
             "batch_job_queue": batch_job_queue,
             "batch_job_definition": batch_job_definition,
             "timestamp": datetime.now().isoformat()
@@ -254,10 +320,12 @@ def lambda_handler(event, context):
                 'status': 'success',
                 'message': 'Batch job submitted successfully',
                 'data': {
-                    'job_id': job_id,  # Return the Lambda job_id (timestamp only)
-                    'batch_job_id': batch_job_id,  # Also return batch job ID
+                    'job_id': job_id,
+                    'batch_job_id': batch_job_id,
                     'job_name': job_name,
                     'url': url,
+                    'brand_name': brand_name,
+                    'max_urls': max_urls,
                     'batch_job_queue': batch_job_queue,
                     'batch_job_definition': batch_job_definition,
                     'timestamp': datetime.now().isoformat()

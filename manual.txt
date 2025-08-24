@@ -1,0 +1,4 @@
+One time manuals
+- Lambda Layers
+- Lambda Roles
+- Lambda Envs

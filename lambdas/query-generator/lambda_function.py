@@ -392,6 +392,7 @@ def generate_questions(product_info: dict, num_questions: int = 25) -> Dict[str,
             f"natural-language questions a user might ask **about this specific product**.\n\n"
             f"Product Information:\n{summary}\n\n"
             f"Output: numbered list of {num_questions} unique questions."
+            f"You should mention the product name and brand name in the question."
         )
 
         market_prompt = (
@@ -400,6 +401,7 @@ def generate_questions(product_info: dict, num_questions: int = 25) -> Dict[str,
             f"ranking, reputation, or market position (no direct competitor comparisons).\n\n"
             f"Product Information:\n{summary}\n\n"
             f"Output: numbered list of {num_questions} unique questions."
+            f"You should mention the product name and brand name in the question."
         )
 
         def _extract(text: str) -> List[str]:

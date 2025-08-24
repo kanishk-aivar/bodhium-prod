@@ -1,0 +1,148 @@
+{
+  "aws_region": "us-east-1",
+  "ecr_registry": "127214200395.dkr.ecr.us-east-1.amazonaws.com",
+  "lambdas": {
+    "orchestrator": {
+      "function_name": "dev-orchestrator",
+      "deployment_type": "code",
+      "source_path": "lambdas/llm-orchestrator",
+      "handler": "lambda_function.lambda_handler",
+      "runtime": "python3.9",
+      "timeout": 300,
+      "memory_size": 512
+    },
+    "perplexity": {
+      "function_name": "dev-perplexity",
+      "deployment_type": "code",
+      "source_path": "lambdas/workers/perplexity",
+      "handler": "lambda_function.lambda_handler",
+      "runtime": "python3.9",
+      "timeout": 300,
+      "memory_size": 512
+    },
+    "aio": {
+      "function_name": "dev-aio",
+      "deployment_type": "container",
+      "source_path": "lambdas/workers/aio",
+      "ecr_repo": "dev-aio",
+      "timeout": 900,
+      "memory_size": 3008
+    },
+    "aim": {
+      "function_name": "dev-aimode",
+      "deployment_type": "container",
+      "source_path": "lambdas/workers/aim",
+      "ecr_repo": "dev-aimode",
+      "timeout": 900,
+      "memory_size": 3008
+    },
+    "chatgpt": {
+      "function_name": "dev-chatgpt",
+      "deployment_type": "container",
+      "source_path": "lambdas/workers/ChatGPT",
+      "ecr_repo": "dev-chatgpt",
+      "timeout": 900,
+      "memory_size": 3008
+    }
+  },
+  "deployment_history": [
+    {
+      "lambda_name": "orchestrator",
+      "version": "v20250822-110855-0d64761",
+      "deployment_type": "code",
+      "timestamp": "2025-08-22T11:09:06.954735",
+      "success": false
+    },
+    {
+      "lambda_name": "perplexity",
+      "version": "v20250822-110855-0d64761",
+      "deployment_type": "code",
+      "timestamp": "2025-08-22T11:09:07.357054",
+      "success": false
+    },
+    {
+      "lambda_name": "aio",
+      "version": "v20250822-110855-0d64761",
+      "deployment_type": "container",
+      "timestamp": "2025-08-22T11:09:08.885927",
+      "success": false
+    },
+    {
+      "lambda_name": "aim",
+      "version": "v20250822-110855-0d64761",
+      "deployment_type": "container",
+      "timestamp": "2025-08-22T11:09:09.845020",
+      "success": false
+    },
+    {
+      "lambda_name": "chatgpt",
+      "version": "v20250822-110855-0d64761",
+      "deployment_type": "container",
+      "timestamp": "2025-08-22T11:09:10.794718",
+      "success": false
+    },
+    {
+      "lambda_name": "orchestrator",
+      "version": "v20250822-112148-0d64761",
+      "deployment_type": "code",
+      "timestamp": "2025-08-22T11:21:54.811786",
+      "success": false
+    },
+    {
+      "lambda_name": "perplexity",
+      "version": "v20250822-112148-0d64761",
+      "deployment_type": "code",
+      "timestamp": "2025-08-22T11:21:55.961346",
+      "success": false
+    },
+    {
+      "lambda_name": "orchestrator",
+      "version": "v20250822-112314-0d64761",
+      "deployment_type": "code",
+      "timestamp": "2025-08-22T11:23:20.647460",
+      "success": false
+    },
+    {
+      "lambda_name": "perplexity",
+      "version": "v20250822-112314-0d64761",
+      "deployment_type": "code",
+      "timestamp": "2025-08-22T11:23:21.641405",
+      "success": false
+    },
+    {
+      "lambda_name": "orchestrator",
+      "version": "v20250822-112505-0d64761",
+      "deployment_type": "code",
+      "timestamp": "2025-08-22T11:25:18.436366",
+      "success": true
+    },
+    {
+      "lambda_name": "perplexity",
+      "version": "v20250822-112505-0d64761",
+      "deployment_type": "code",
+      "timestamp": "2025-08-22T11:25:25.840414",
+      "success": true
+    },
+    {
+      "lambda_name": "aio",
+      "version": "v20250822-112505-0d64761",
+      "deployment_type": "container",
+      "timestamp": "2025-08-22T11:27:45.765285",
+      "success": false
+    },
+    {
+      "lambda_name": "aim",
+      "version": "v20250822-113628-0d64761",
+      "deployment_type": "container",
+      "timestamp": "2025-08-22T11:38:00.485507",
+      "success": false
+    },
+    {
+      "lambda_name": "chatgpt",
+      "version": "v20250822-114419-0d64761",
+      "deployment_type": "container",
+      "timestamp": "2025-08-22T11:46:45.672469",
+      "success": false
+    }
+  ]
+}

@@ -1,0 +1,3 @@
+# Requirements for Bodhium Deployment Script
+boto3>=1.26.0
+botocore>=1.29.0
