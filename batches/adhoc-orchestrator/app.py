@@ -1,12 +1,14 @@
 import os
+import sys
 import boto3
 import botocore
 import logging
-import re  # Added for query pattern matching
+import re
 import json
 import uuid
 import psycopg2
 import time
+import argparse
 from decimal import Decimal
 from datetime import datetime, timezone
 
@@ -14,18 +16,13 @@ from datetime import datetime, timezone
 # DynamoDB table for file tracking
 FILE_TRACKING_TABLE = os.environ.get('FILE_TRACKING_TABLE', 'Adhoc-Query-Tracker')
 
-
 # RDS/DB & test product-id settings - ALWAYS Adhoc_trigger mode
 TEST_PRODUCT_ID = int(os.environ.get('TEST_PRODUCT_ID', 99999999))
-FORCE_FANOUT = True  # Always force fanout for all 4 LLMs!
-
+FORCE_FANOUT = os.environ.get('FORCE_LLM_FANOUT', 'true').lower() == 'true'  # Force fanout based on env var
 
 # S3 and job ID settings
 JOB_ID_BUCKET = os.environ.get('JOB_ID_BUCKET')
 JOB_ID_PATH = os.environ.get('JOB_ID_PATH')
-# LAMBDA_RESULTS_FORMATTER = os.environ.get('LAMBDA_RESULTS_FORMATTER')
-# RESULT_TRIGGER_TIME = int(os.environ.get('RESULT_TRIGGER_TIME', 13))  # Default 13 minutes
-
 
 # Structured logging setup
 logger = logging.getLogger()
@@ -36,28 +33,61 @@ if not logger.handlers:
     stream_handler.setFormatter(formatter)
     logger.addHandler(stream_handler)
 
-
 # AWS Services
 dynamodb = boto3.resource('dynamodb')
 orchestration_table = dynamodb.Table(os.environ.get('ORCHESTRATION_LOGS_TABLE', 'OrchestrationLogs'))
 file_tracking_table = dynamodb.Table(FILE_TRACKING_TABLE)
 s3_client = boto3.client('s3')
 
-
 # Secrets Manager
 SECRET_NAME = os.environ.get('RDS_DB', 'dev/rds')
 REGION_NAME = os.environ.get('AWS_REGION', 'us-east-1')
 secrets_client = boto3.client('secretsmanager', region_name=REGION_NAME)
 
-
 # Lambda ARNs (must never be blank)
-TARGETS = {
-    "chatgpt": os.environ["LAMBDA_CHATGPT_V1"],
-    "aio": os.environ["LAMBDA_AIOVERVIEW"], 
-    "aim": os.environ["LAMBDA_AIMODE"],
-    "perplexity": os.environ["LAMBDA_PERPLEXITYAPI"]
-}
+def get_lambda_arns():
+    """Get Lambda ARNs from environment variables or Secrets Manager"""
+    try:
+        # Try to get from environment variables first
+        required_keys = ["LAMBDA_CHATGPT_V1", "LAMBDA_AIOVERVIEW", "LAMBDA_AIMODE", "LAMBDA_PERPLEXITYAPI"]
+        if all(key in os.environ for key in required_keys):
+            return {
+                "chatgpt": os.environ["LAMBDA_CHATGPT_V1"],
+                "aio": os.environ["LAMBDA_AIOVERVIEW"], 
+                "aim": os.environ["LAMBDA_AIMODE"],
+                "perplexity": os.environ["LAMBDA_PERPLEXITYAPI"]
+            }
+        else:
+            # Get from Secrets Manager
+            logger.info("Lambda ARNs not found in environment, fetching from Secrets Manager")
+            secrets_client = boto3.client('secretsmanager', region_name=REGION_NAME)
+            
+            # Get Lambda ARNs from Secrets Manager
+            lambda_arns = {}
+            secret_names = {
+                "chatgpt": "lambda-arns/chatgpt",
+                "aio": "lambda-arns/aio", 
+                "aim": "lambda-arns/aim",
+                "perplexity": "lambda-arns/perplexity"
+            }
+            
+            for key, secret_name in secret_names.items():
+                try:
+                    response = secrets_client.get_secret_value(SecretId=secret_name)
+                    lambda_arns[key] = response['SecretString']
+                    logger.info(f"Retrieved {key} Lambda ARN from Secrets Manager")
+                except Exception as e:
+                    logger.error(f"Failed to get {key} Lambda ARN from Secrets Manager: {e}")
+                    raise
+            
+            return lambda_arns
+            
+    except Exception as e:
+        logger.error(f"Failed to get Lambda ARNs: {e}")
+        raise
 
+# Initialize Lambda ARNs
+TARGETS = get_lambda_arns()
 
 lambda_boto_config = botocore.config.Config(read_timeout=900, connect_timeout=60)
 lambda_client = boto3.client("lambda", config=lambda_boto_config)
@@ -198,44 +228,6 @@ def update_file_processing_status(bucket, key, status, job_id=None):
         logger.error(f"Error updating file status: {str(e)}")
 
 
-# def trigger_delayed_lambda(job_id, start_time):
-#     """Trigger the results formatter Lambda after specified delay"""
-#     try:
-#         if not LAMBDA_RESULTS_FORMATTER:
-#             logger.warning("LAMBDA_RESULTS_FORMATTER not configured, skipping delayed trigger")
-#             return
-#         
-#         # Calculate delay in seconds
-#         delay_seconds = RESULT_TRIGGER_TIME * 60  # Convert minutes to seconds
-#         
-#         # Calculate when to trigger (13th minute from start)
-#         trigger_time = start_time + timedelta(minutes=RESULT_TRIGGER_TIME)
-#         current_time = datetime.now(timezone.utc)
-#         
-#         # Wait until the specified time
-#         wait_seconds = (trigger_time - current_time).total_seconds()
-#         logger.info(f"Waiting {wait_seconds} seconds before triggering results formatter Lambda")
-#         time.sleep(wait_seconds)
-#         
-#         # Trigger the results formatter Lambda
-#         payload = {
-#             "job_id": job_id,
-#             "triggered_at": datetime.now(timezone.utc).isoformat(),
-#             "source": "orchestrator_delayed_trigger"
-#         }
-#         
-#         lambda_client.invoke(
-#             FunctionName=LAMBDA_RESULTS_FORMATTER,
-#             InvocationType="Event",
-#             Payload=json.dumps(payload)
-#         )
-#         
-#         logger.info(f"Triggered delayed Lambda {LAMBDA_RESULTS_FORMATTER} for job_id: {job_id}")
-#         
-#     except Exception as e:
-#         logger.error(f"Failed to trigger delayed Lambda: {e}")
-
-
 def get_rds_connection():
     try:
         secret_response = secrets_client.get_secret_value(SecretId=SECRET_NAME)
@@ -295,7 +287,6 @@ class OrchestrationLogger:
         self.table = dynamodb.Table(self.table_name)
         logger.info(f"OrchestrationLogger initialized with table: {self.table_name}")
 
-
     def convert_to_dynamodb_format(self, data):
         if isinstance(data, dict):
             return {k: self.convert_to_dynamodb_format(v) for k, v in data.items()}
@@ -310,12 +301,10 @@ class OrchestrationLogger:
         else:
             return str(data)
 
-
     def create_event_timestamp_id(self):
         timestamp = datetime.now(timezone.utc).isoformat()
         unique_id = str(uuid.uuid4())[:8]
         return f"{timestamp}#{unique_id}"
-
 
     def log_event(self, job_id, event_name, details=None):
         try:
@@ -336,7 +325,6 @@ class OrchestrationLogger:
 
 
 orchestration_logger = OrchestrationLogger()
-
 
 # Model matching patterns (replicated from main orchestrator)
 MATCH_TABLE = [
@@ -523,7 +511,6 @@ def process_queries(job_id, query_objs, options, static_product_id=None, start_t
             "fanout_results": fanout_results
         })
 
-
         # Add 3-second delay after each query's fanout (except for the last query)
         if i < len(query_objs) - 1:
             logger.info(f"[RATE_LIMIT] Applying 3-second delay after query {i + 1}/{len(query_objs)} fanout batch")
@@ -548,13 +535,8 @@ def process_queries(job_id, query_objs, options, static_product_id=None, start_t
             })
             logger.info(f"[RATE_LIMIT] Completed 3-second delay after query {i + 1}/{len(query_objs)}")
 
-
     # Store job_id to S3
     store_job_id_to_s3(job_id, JOB_ID_BUCKET, JOB_ID_PATH)
-    
-    # Trigger delayed Lambda for results formatting
-    # if start_time:
-    #     trigger_delayed_lambda(job_id, start_time)
     
     final_response = {
         "job_id": job_id,
@@ -581,104 +563,58 @@ def process_queries(job_id, query_objs, options, static_product_id=None, start_t
     return final_response
 
 
-def lambda_handler(event, context):
-    # Record start time for delayed Lambda trigger (commented out for now)
-    # start_time = datetime.now(timezone.utc)
+def process_s3_event(bucket, key, job_id):
+    """Process S3 event - extract queries from uploaded file"""
+    logger.info(f"Processing S3 upload: {bucket}/{key}")
+    
+    # Check if file has already been processed
+    if check_and_mark_file_processed(bucket, key):
+        logger.info(f"File {bucket}/{key} has already been processed. Skipping.")
+        return {
+            'status': 'skipped',
+            'message': 'File already processed',
+            'bucket': bucket,
+            'key': key,
+            'job_id': job_id
+        }
+    
+    # Read JSON content from S3
+    s3_data = read_json_from_s3(bucket, key)
+    queries = s3_data.get("queries", [])
+    options = s3_data.get("options", {})
+    
+    logger.info(f"Read {len(queries)} queries from S3 file")
+    
+    if not queries:
+        logger.error("No queries found in S3 file")
+        update_file_processing_status(bucket, key, "failed", job_id)
+        return {"error": "No queries found in S3 file"}
+    
+    return process_queries_data(queries, options, bucket, key, job_id)
+
+
+def process_direct_input(queries, options, job_id):
+    """Process direct input queries"""
+    logger.info(f"Processing direct input with {len(queries)} queries")
+    return process_queries_data(queries, options, None, None, job_id)
+
+
+def process_queries_data(queries, options, bucket=None, key=None, job_id=None):
+    """Common processing logic for both S3 and direct input"""
+    if not job_id:
+        job_id = str(uuid.uuid4())
     
     # ALWAYS Adhoc_trigger mode - no other mode supported
     mode = "Adhoc_trigger"
-    job_id = str(uuid.uuid4())
-
-
-    logger.info(f"Received event: {event}")
+    
+    logger.info(f"Processing job {job_id} in {mode} mode")
     
     orchestration_logger.log_event(job_id, "OrchestrationStarted", {
-        "event": event,
-        "context": {
-            "function_name": context.function_name,
-            "function_version": context.function_version,
-            "invoked_function_arn": context.invoked_function_arn,
-            "memory_limit_in_mb": context.memory_limit_in_mb,
-            "remaining_time_in_millis": context.get_remaining_time_in_millis()
-        },
+        "queries_count": len(queries),
+        "options": options,
         "mode": mode,
         "status": "created"
     })
-    
-    queries = []
-    options = {}
-    bucket = None
-    key = None
-    
-    try:
-        # Handle S3 event (file upload)
-        if 'Records' in event and event['Records']:
-            s3_record = event['Records'][0]
-            if s3_record.get('eventName', '').startswith('ObjectCreated'):
-                bucket = s3_record['s3']['bucket']['name']
-                key = s3_record['s3']['object']['key']
-                
-                logger.info(f"Processing S3 upload: {bucket}/{key}")
-                
-                # CRITICAL: Check if file has already been processed
-                if check_and_mark_file_processed(bucket, key):
-                    return {
-                        'statusCode': 200,
-                        'body': json.dumps({
-                            'message': 'File already processed',
-                            'bucket': bucket,
-                            'key': key,
-                            'job_id': job_id,
-                            'mode': mode
-                        })
-                    }
-                
-                # Read JSON content from S3
-                s3_data = read_json_from_s3(bucket, key)
-                queries = s3_data.get("queries", [])
-                options = s3_data.get("options", {})
-                
-                logger.info(f"Read {len(queries)} queries from S3 file")
-        
-        # Fallback to direct event input (for backward compatibility)
-        if not queries:
-            if 'body' in event and event['body']:
-                body = event['body']
-                if isinstance(body, str): 
-                    body = json.loads(body)
-                queries = body.get("queries")
-                options = body.get("options", {})
-            else:
-                queries = event.get("queries") or event.get("query", [])
-                options = event.get("options", {})
-                
-    except (json.JSONDecodeError, AttributeError) as e:
-        orchestration_logger.log_event(job_id, "OrchestrationFailed", {
-            "error": f"Failed to parse request body: {e}",
-            "mode": mode,
-            "status": "failed"
-        })
-        logger.error(f"Failed to parse request body: {e}")
-        
-        # Update file status to failed if it was an S3 trigger
-        if bucket and key:
-            update_file_processing_status(bucket, key, "failed", job_id)
-            
-        return {"error": "Invalid JSON in request body"}
-    
-    if not queries:
-        orchestration_logger.log_event(job_id, "OrchestrationFailed", {
-            "error": "No queries provided in the event",
-            "mode": mode,
-            "status": "failed"
-        })
-        logger.error("No queries provided")
-        
-        # Update file status to failed if it was an S3 trigger
-        if bucket and key:
-            update_file_processing_status(bucket, key, "failed", job_id)
-            
-        return {"error": "No queries provided"}
     
     if not isinstance(queries, list):
         queries = [queries]
@@ -688,17 +624,17 @@ def lambda_handler(event, context):
     query_objs = []
     
     try:
-        insert_scrapejob(job_id, event.get("source_url", "test_source_url"), "llm_generated")
+        # Update file status to processing if S3 event
+        if bucket and key:
+            update_file_processing_status(bucket, key, "processing", job_id)
+        
+        insert_scrapejob(job_id, "batch_processing", "llm_generated")
         for q in queries:
             # Always use "Adhoc_trigger" as query_type
             query_id = insert_query(q, "Adhoc_trigger", static_product_id, True)
             query_objs.append((q, query_id))
         logger.info(f"[ADHOC_TRIGGER MODE] Created scrapejob {job_id} and queries {[t[1] for t in query_objs]}")
         
-        # Update file status to processing
-        if bucket and key:
-            update_file_processing_status(bucket, key, "processing", job_id)
-            
     except Exception as e:
         logger.error(f"[ADHOC_TRIGGER MODE] Error creating job/query: {str(e)}")
         orchestration_logger.log_event(job_id, "TestDataSetupFailed", {
@@ -731,29 +667,93 @@ def lambda_handler(event, context):
     
     logger.info(f"Completed processing for job {job_id}. All lambdas triggered.")
     
-    # Update file status to completed
+    # Update file status to completed if S3 event
     if bucket and key:
         update_file_processing_status(bucket, key, "completed", job_id)
     
-    # Return 202 Accepted response (matching main orchestrator)
     return {
-        "statusCode": 202,
-        "headers": {
-            "Content-Type": "application/json",
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Headers": "Content-Type",
-            "Access-Control-Allow-Methods": "POST, OPTIONS"
-        },
-        "body": json.dumps({
-            "status": "accepted",
-            "message": "Job submitted successfully. All lambdas have been triggered.",
-            "job_id": job_id,
-            "product_groups_count": 1,
-            "total_queries_count": len(query_objs),
-            "mode": "Adhoc_trigger",
-            "polling_info": {
-                "table_name": os.environ.get('ORCHESTRATION_LOGS_TABLE', 'OrchestrationLogs'),
-                "query_example": f"SELECT * FROM {os.environ.get('ORCHESTRATION_LOGS_TABLE', 'OrchestrationLogs')} WHERE job_id = '{job_id}'"
-            }
-        })
+        "status": "accepted",
+        "message": "Job submitted successfully. All lambdas have been triggered.",
+        "job_id": job_id,
+        "product_groups_count": 1,
+        "total_queries_count": len(query_objs),
+        "mode": "Adhoc_trigger",
+        "polling_info": {
+            "table_name": os.environ.get('ORCHESTRATION_LOGS_TABLE', 'OrchestrationLogs'),
+            "query_example": f"SELECT * FROM {os.environ.get('ORCHESTRATION_LOGS_TABLE', 'OrchestrationLogs')} WHERE job_id = '{job_id}'"
+        }
     }
+
+
+def main():
+    """Main entry point for AWS Batch job"""
+    parser = argparse.ArgumentParser(description='LLM CSV Orchestrator - AWS Batch Version')
+    parser.add_argument('--s3-bucket', help='S3 bucket name for file processing')
+    parser.add_argument('--s3-key', help='S3 key for file processing')
+    parser.add_argument('--queries', nargs='+', help='Direct queries to process')
+    parser.add_argument('--queries-file', help='JSON file containing queries')
+    parser.add_argument('--options', help='JSON string of options')
+    
+    # Parse known arguments only - ignore unknown arguments from AWS Batch
+    args, unknown = parser.parse_known_args()
+    
+    # Log unknown arguments for debugging
+    if unknown:
+        logger.info(f"Ignoring unknown arguments: {unknown}")
+    
+    try:
+        # Check for S3 parameters from environment variables (AWS Batch container overrides)
+        s3_bucket = args.s3_bucket or os.environ.get('S3_BUCKET')
+        s3_key = args.s3_key or os.environ.get('S3_KEY')
+        job_id = os.environ.get('JOB_ID') or str(uuid.uuid4())
+        
+        # Log environment variables for debugging
+        logger.info(f"Environment variables - S3_BUCKET: {os.environ.get('S3_BUCKET')}, S3_KEY: {os.environ.get('S3_KEY')}")
+        logger.info(f"Command line args - s3_bucket: {args.s3_bucket}, s3_key: {args.s3_key}")
+        logger.info(f"Final values - s3_bucket: {s3_bucket}, s3_key: {s3_key}")
+        
+        # Determine input source
+        if s3_bucket and s3_key:
+            # S3 event processing
+            logger.info(f"Processing S3 file: {s3_bucket}/{s3_key}")
+            result = process_s3_event(s3_bucket, s3_key, job_id)
+        elif args.queries:
+            # Direct queries from command line
+            options = json.loads(args.options) if args.options else {}
+            result = process_direct_input(args.queries, options, job_id)
+        elif args.queries_file:
+            # Queries from JSON file
+            with open(args.queries_file, 'r') as f:
+                data = json.load(f)
+                queries = data.get('queries', [])
+                options = data.get('options', {})
+            result = process_direct_input(queries, options, job_id)
+        else:
+            # Try to read from stdin (for AWS Batch job parameters)
+            try:
+                input_data = json.loads(sys.stdin.read())
+                if 'bucket' in input_data and 'key' in input_data:
+                    # S3 event format
+                    result = process_s3_event(input_data['bucket'], input_data['key'], job_id)
+                elif 'queries' in input_data:
+                    # Direct queries format
+                    result = process_direct_input(input_data['queries'], input_data.get('options', {}), job_id)
+                else:
+                    raise ValueError("Invalid input format")
+            except (json.JSONDecodeError, ValueError) as e:
+                logger.error(f"Failed to parse input: {e}")
+                print(json.dumps({"error": f"Invalid input format: {e}"}))
+                sys.exit(1)
+        
+        # Output result
+        print(json.dumps(result, indent=2))
+        
+    except Exception as e:
+        logger.error(f"Batch processing failed: {e}")
+        error_result = {"error": str(e), "status": "failed"}
+        print(json.dumps(error_result, indent=2))
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
