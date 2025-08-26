@@ -266,7 +266,7 @@ class BodhiumDeployer:
             self.print_error(f"Failed to check ECR repository {repo_name}: {e}")
             return False
     
-    def build_and_push_container(self, lambda_name: str, version_tag: str) -> bool:
+    def build_and_push_container(self, lambda_name: str, version_tag: str, no_cache: bool = False) -> bool:
         """Build and push container to ECR"""
         lambda_config = self.config.get_lambda_config(lambda_name)
         source_path = lambda_config["source_path"]
@@ -291,32 +291,66 @@ class BodhiumDeployer:
         ecr_image_tag = f"{self.ecr_registry}/{image_tag}"
         
         try:
-            cmd = [
-                'docker', 'build',
+            cmd = ['docker', 'build']
+            
+            # Add --no-cache flag if requested
+            if no_cache:
+                cmd.append('--no-cache')
+                self.print_status("Building without cache (clean build)...")
+            
+            cmd.extend([
                 '--platform', 'linux/amd64',
                 '--provenance', 'false',
                 '-t', image_tag,
                 '-t', ecr_image_tag,
                 source_path
-            ]
+            ])
             
-            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+            # Show real-time output for Docker build
+            result = subprocess.run(cmd, check=True, text=True)
             self.print_success(f"Successfully built image: {image_tag}")
             
         except subprocess.CalledProcessError as e:
-            self.print_error(f"Docker build failed for {lambda_name}: {e.stderr}")
+            self.print_error(f"Docker build failed for {lambda_name}")
+            logger.error(f"Docker build command failed: {e}")
+            logger.error(f"Command: {' '.join(cmd)}")
+            return False
+        except Exception as e:
+            self.print_error(f"Unexpected error during Docker build for {lambda_name}: {e}")
+            logger.error(f"Docker build unexpected error: {e}")
             return False
         
         # Push to ECR
         self.print_status(f"Pushing image to ECR: {ecr_image_tag}")
+        
+        # Check ECR login status first
+        try:
+            self.print_status("Checking ECR login status...")
+            login_check = subprocess.run(['docker', 'info'], capture_output=True, text=True)
+            if '127214200395.dkr.ecr.us-east-1.amazonaws.com' not in login_check.stdout:
+                self.print_warning("ECR login may have expired, attempting to re-authenticate...")
+                # Try to re-authenticate with ECR
+                ecr_login_cmd = f"aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin 127214200395.dkr.ecr.us-east-1.amazonaws.com"
+                subprocess.run(ecr_login_cmd, shell=True, check=True, text=True)
+                self.print_success("ECR re-authentication successful")
+        except Exception as e:
+            self.print_warning(f"ECR login check failed: {e}")
+        
         try:
             cmd = ['docker', 'push', ecr_image_tag]
-            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+            # Show real-time output for Docker push
+            result = subprocess.run(cmd, check=True, text=True)
             self.print_success(f"Successfully pushed image: {ecr_image_tag}")
             return True
             
         except subprocess.CalledProcessError as e:
-            self.print_error(f"Docker push failed for {lambda_name}: {e.stderr}")
+            self.print_error(f"Docker push failed for {lambda_name}")
+            logger.error(f"Docker push command failed: {e}")
+            logger.error(f"Command: {' '.join(cmd)}")
+            return False
+        except Exception as e:
+            self.print_error(f"Unexpected error during Docker push for {lambda_name}: {e}")
+            logger.error(f"Docker push unexpected error: {e}")
             return False
     
     def create_lambda_zip(self, source_path: str) -> str:
@@ -492,7 +526,7 @@ class BodhiumDeployer:
             self.print_error(f"Failed to deploy {lambda_name} container: {e}")
             return False
     
-    def deploy_lambda(self, lambda_name: str, version_tag: str = None) -> bool:
+    def deploy_lambda(self, lambda_name: str, version_tag: str = None, no_cache: bool = False) -> bool:
         """Deploy a single Lambda function"""
         if version_tag is None:
             version_tag = self.generate_version_tag()
@@ -511,7 +545,7 @@ class BodhiumDeployer:
             success = self.deploy_lambda_code(lambda_name, version_tag)
         elif deployment_type == "container":
             # Build and push container first
-            if self.build_and_push_container(lambda_name, version_tag):
+            if self.build_and_push_container(lambda_name, version_tag, no_cache):
                 success = self.deploy_lambda_container(lambda_name, version_tag)
         else:
             self.print_error(f"Unknown deployment type: {deployment_type}")
@@ -687,7 +721,9 @@ def main():
 Examples:
   %(prog)s init-config                           # Initialize configuration file (required first step)
   %(prog)s deploy --lambda orchestrator         # Deploy single Lambda function
+  %(prog)s deploy --lambda aio --no-cache       # Deploy with clean Docker build
   %(prog)s deploy-all                           # Deploy all Lambda functions
+  %(prog)s deploy-all --no-cache                # Deploy all with clean Docker builds
   %(prog)s revert --lambda aio                  # Revert single Lambda to previous version
   %(prog)s revert --multiple aio aim chatgpt   # Revert multiple Lambdas
   %(prog)s history                              # Show deployment history
@@ -728,6 +764,10 @@ Configuration:
                        choices=['orchestrator', 'perplexity', 'aio', 'aim', 'chatgpt'],
                        help='Multiple lambda names for batch operations')
     
+    parser.add_argument('--no-cache', 
+                       action='store_true',
+                       help='Build Docker images without cache (clean build)')
+    
     args = parser.parse_args()
     
     # Handle init-config action before creating deployer (which requires config file)
@@ -746,11 +786,11 @@ Configuration:
             print("Error: --lambda is required for deploy action")
             sys.exit(1)
         
-        success = deployer.deploy_lambda(lambda_name, args.version)
+        success = deployer.deploy_lambda(lambda_name, args.version, args.no_cache)
         sys.exit(0 if success else 1)
     
     elif args.action == 'deploy-all':
-        success = deployer.deploy_all(args.version)
+        success = deployer.deploy_all(args.version, args.no_cache)
         sys.exit(0 if success else 1)
     
     elif args.action == 'revert':

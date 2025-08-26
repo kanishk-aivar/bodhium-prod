@@ -143,6 +143,118 @@
       "deployment_type": "container",
       "timestamp": "2025-08-22T11:46:45.672469",
       "success": false
+    },
+    {
+      "lambda_name": "aio",
+      "version": "v20250824-172110-8256999",
+      "deployment_type": "container",
+      "timestamp": "2025-08-24T17:22:45.503126",
+      "success": false
+    },
+    {
+      "lambda_name": "aio",
+      "version": "v20250824-172309-8256999",
+      "deployment_type": "container",
+      "timestamp": "2025-08-24T17:23:14.087595",
+      "success": false
+    },
+    {
+      "lambda_name": "aio",
+      "version": "v20250824-173829-8256999",
+      "deployment_type": "container",
+      "timestamp": "2025-08-24T17:45:19.669615",
+      "success": false
+    },
+    {
+      "lambda_name": "aio",
+      "version": "v20250824-175043-8256999",
+      "deployment_type": "container",
+      "timestamp": "2025-08-24T17:54:40.369416",
+      "success": false
+    },
+    {
+      "lambda_name": "aio",
+      "version": "v20250824-221121-8256999",
+      "deployment_type": "container",
+      "timestamp": "2025-08-24T22:14:46.342278",
+      "success": true
+    },
+    {
+      "lambda_name": "aio",
+      "version": "v20250824-222458-8256999",
+      "deployment_type": "container",
+      "timestamp": "2025-08-24T22:25:34.775793",
+      "success": true
+    },
+    {
+      "lambda_name": "aio",
+      "version": "v20250824-222958-8256999",
+      "deployment_type": "container",
+      "timestamp": "2025-08-24T22:30:41.905221",
+      "success": true
+    },
+    {
+      "lambda_name": "aio",
+      "version": "v20250824-223534-8256999",
+      "deployment_type": "container",
+      "timestamp": "2025-08-24T22:39:53.754195",
+      "success": true
+    },
+    {
+      "lambda_name": "aio",
+      "version": "v20250824-224541-8256999",
+      "deployment_type": "container",
+      "timestamp": "2025-08-24T22:54:13.511605",
+      "success": true
+    },
+    {
+      "lambda_name": "aio",
+      "version": "v20250824-225748-8256999",
+      "deployment_type": "container",
+      "timestamp": "2025-08-24T22:59:42.128260",
+      "success": false
+    },
+    {
+      "lambda_name": "aio",
+      "version": "v20250824-230334-8256999",
+      "deployment_type": "container",
+      "timestamp": "2025-08-24T23:03:36.970504",
+      "success": false
+    },
+    {
+      "lambda_name": "aio",
+      "version": "v20250824-232900-8256999",
+      "deployment_type": "container",
+      "timestamp": "2025-08-24T23:30:03.824965",
+      "success": false
+    },
+    {
+      "lambda_name": "aio",
+      "version": "v20250824-233106-8256999",
+      "deployment_type": "container",
+      "timestamp": "2025-08-24T23:39:06.222488",
+      "success": true
+    },
+    {
+      "lambda_name": "aio",
+      "version": "v20250824-234633-8256999",
+      "deployment_type": "container",
+      "timestamp": "2025-08-24T23:48:27.438227",
+      "success": false
+    },
+    {
+      "lambda_name": "aio",
+      "version": "v20250824-235035-8256999",
+      "deployment_type": "container",
+      "timestamp": "2025-08-25T00:00:19.631537",
+      "success": false
+    },
+    {
+      "lambda_name": "aio",
+      "version": "v20250825-091433-8256999",
+      "deployment_type": "container",
+      "timestamp": "2025-08-25T09:16:36.913835",
+      "success": true
     }
   ]
 }
