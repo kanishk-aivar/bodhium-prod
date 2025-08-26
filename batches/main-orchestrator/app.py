@@ -188,9 +188,15 @@ def extract_models_from_query(query):
     logger.info("No explicit or inferred models. Triggering fan-out to all.")
     return []
 
-def trigger_lambda(lambda_arn, payload_dict, job_id: str, query_id: int = None):
+def trigger_lambda(lambda_arn, payload_dict, job_id: str, query_id: int = None, session_id: str = None, task_id: str = None):
     """Trigger lambda without waiting for response"""
     try:
+        # Add session_id and task_id to payload if provided
+        if session_id and "session_id" not in payload_dict:
+            payload_dict["session_id"] = session_id
+        if task_id and "task_id" not in payload_dict:
+            payload_dict["task_id"] = task_id
+            
         model_name = get_model_name_from_arn(lambda_arn)
         
         # Map lambda ARN to model key
@@ -207,7 +213,9 @@ def trigger_lambda(lambda_arn, payload_dict, job_id: str, query_id: int = None):
             "lambda_arn": lambda_arn,
             "function_name": lambda_arn.split(":")[-1],
             "payload_size": len(str(payload)),
-            "query_id": query_id
+            "query_id": query_id,
+            "session_id": session_id,
+            "task_id": task_id
         })
         
         # Trigger lambda asynchronously (Event invocation type)
@@ -227,18 +235,134 @@ def trigger_lambda(lambda_arn, payload_dict, job_id: str, query_id: int = None):
             "lambda_arn": lambda_arn,
             "function_name": lambda_arn.split(":")[-1],
             "error": str(e),
-            "query_id": query_id
+            "query_id": query_id,
+            "session_id": session_id,
+            "task_id": task_id
         })
         return False
 
+def process_retry_tasks(retry_tasks, session_id, job_id):
+    """Process a list of retry_tasks, each specifying a model to retry."""
+    orchestration_logger.log_event(job_id, "SelectiveRetryStarted", {
+        "retry_tasks_count": len(retry_tasks),
+        "session_id": session_id
+    })
+
+    for task in retry_tasks:
+        task_id = task.get("task_id")
+        if not task_id:
+            logger.warning(f"Skipping retry task with no task_id: {task}")
+            continue
+
+        query_id = task.get("query_id")
+        if not query_id:
+            logger.warning(f"Skipping retry task {task_id} with no query_id: {task}")
+            continue
+
+        product_id = task.get("product_id")
+        if not product_id:
+            logger.warning(f"Skipping retry task {task_id} with no product_id: {task}")
+            continue
+
+        model = task.get("model")
+        if not model:
+            logger.warning(f"Skipping retry task {task_id} with no model: {task}")
+            continue
+
+        if model not in TARGETS:
+            logger.warning(f"Skipping retry task {task_id} for unknown model: {model}")
+            continue
+
+        lambda_arn = TARGETS[model]
+        logger.info(f"Retrying task {task_id} (product {product_id}) for model {model} (query {query_id})")
+
+        # Fetch query_text from database using query_id
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT query_text FROM queries WHERE query_id = %s",
+                (query_id,)
+            )
+            result = cursor.fetchone()
+            cursor.close()
+            conn.close()
+            
+            if result:
+                query_text = result[0]
+                logger.info(f"Retrieved query_text for query_id {query_id}: '{query_text}'")
+            else:
+                logger.warning(f"No query_text found for query_id {query_id}, skipping retry")
+                continue
+                
+        except Exception as db_error:
+            logger.error(f"Failed to fetch query_text for query_id {query_id}: {db_error}")
+            continue
+
+        trigger_lambda(
+            lambda_arn,
+            {
+                "query": query_text,
+                "job_id": job_id,
+                "query_id": query_id,
+                "product_id": product_id,
+                "task_id": task_id # Ensure task_id is passed for retry
+            },
+            job_id,
+            query_id,
+            session_id,
+            task_id
+        )
+        orchestration_logger.log_event(job_id, "SelectiveRetryCompleted", {
+            "task_id": task_id,
+            "product_id": product_id,
+            "query_id": query_id,
+            "model_retried": model
+        })
+
+    orchestration_logger.log_event(job_id, "SelectiveRetryCompleted", {
+        "retry_tasks_count": len(retry_tasks),
+        "session_id": session_id
+    })
+    return {
+        "status": "accepted",
+        "message": "Job submitted successfully. All selective retries have been triggered.",
+        "job_id": job_id,
+        "session_id": session_id,
+        "retry_tasks_count": len(retry_tasks),
+        "polling_info": {
+            "table_name": os.environ.get('ORCHESTRATION_LOGS_TABLE', 'OrchestrationLogs'),
+            "query_example": f"SELECT * FROM {os.environ.get('ORCHESTRATION_LOGS_TABLE', 'OrchestrationLogs')} WHERE job_id = '{job_id}'"
+        }
+    }
+
 def process_queries_data(selected_queries, options, job_id):
     """Process queries data and trigger lambdas"""
-    if not selected_queries:
+    
+    # Check if this is a retry request
+    is_retry = options.get('retry', False)
+    session_id = options.get('session_id')
+    retry_tasks = options.get('retry_tasks', [])
+    
+    # For retry requests, we don't need selected_queries since we're retrying existing tasks
+    if not selected_queries and not is_retry:
         logger.warning("No selected_queries provided.")
         orchestration_logger.log_event(job_id, "OrchestrationFailed", {
             "error": "No selected_queries provided"
         })
         return {"error": "No selected_queries provided"}
+    
+    # Generate session_id if not provided (for new requests)
+    if not session_id:
+        session_id = str(uuid.uuid4())
+        logger.info(f"Generated new session_id: {session_id}")
+    else:
+        logger.info(f"Using provided session_id for retry: {session_id}")
+
+    # Handle retry_tasks format for selective retries
+    if is_retry and retry_tasks:
+        logger.info(f"Processing selective retry for {len(retry_tasks)} tasks with session_id: {session_id}")
+        return process_retry_tasks(retry_tasks, session_id, job_id)
 
     # Calculate total queries (both existing and new)
     total_queries = 0
@@ -247,7 +371,7 @@ def process_queries_data(selected_queries, options, job_id):
         total_queries += len(sq.get("existing_queries", []))  # New format: existing queries
         total_queries += len(sq.get("new_queries", []))  # New format: new queries
     
-    logger.info(f"Processing {len(selected_queries)} product groups with {total_queries} total queries for job {job_id}")
+    logger.info(f"Processing {len(selected_queries)} product groups with {total_queries} total queries for job {job_id} with session_id {session_id}")
     
     # Find highest existing query_id to avoid conflicts when generating new ones
     max_existing_query_id = 0
@@ -258,6 +382,10 @@ def process_queries_data(selected_queries, options, job_id):
                 max_existing_query_id = max(max_existing_query_id, eq["query_id"])
     
     query_counter = max_existing_query_id  # Start new query IDs after existing ones
+    
+    # Helper function to generate task_id for each worker
+    def generate_task_id():
+        return str(uuid.uuid4())
     
     for product_group in selected_queries:
         product_id = product_group.get("product_id")
@@ -308,6 +436,7 @@ def process_queries_data(selected_queries, options, job_id):
                     logger.info(f"Routing existing query {query_id} (product {product_id}) to models: {selected_models}")
                     for model in selected_models:
                         lambda_arn = TARGETS[model]
+                        task_id = generate_task_id()
                         trigger_lambda(
                             lambda_arn, 
                             {
@@ -317,7 +446,9 @@ def process_queries_data(selected_queries, options, job_id):
                                 "product_id": product_id
                             }, 
                             job_id,
-                            query_id
+                            query_id,
+                            session_id,
+                            task_id
                         )
                 else:
                     # Fan-out to all models
@@ -331,6 +462,7 @@ def process_queries_data(selected_queries, options, job_id):
                     })
                     
                     for key, arn in TARGETS.items():
+                        task_id = generate_task_id()
                         trigger_lambda(
                             arn,
                             {
@@ -340,7 +472,9 @@ def process_queries_data(selected_queries, options, job_id):
                                 "product_id": product_id
                             },
                             job_id,
-                            query_id
+                            query_id,
+                            session_id,
+                            task_id
                         )
                     
                     orchestration_logger.log_event(job_id, "FanoutCompleted", {
@@ -381,6 +515,7 @@ def process_queries_data(selected_queries, options, job_id):
                 logger.info(f"Routing new query {query_id} (product {product_id}) to models: {selected_models}")
                 for model in selected_models:
                     lambda_arn = TARGETS[model]
+                    task_id = generate_task_id()
                     trigger_lambda(
                         lambda_arn, 
                         {
@@ -390,7 +525,9 @@ def process_queries_data(selected_queries, options, job_id):
                             "product_id": product_id
                         }, 
                         job_id,
-                        query_id
+                        query_id,
+                        session_id,
+                        task_id
                     )
             else:
                 # Fan-out to all models
@@ -452,6 +589,7 @@ def process_queries_data(selected_queries, options, job_id):
                 logger.info(f"Routing old format query {query_id} (product {product_id}) to models: {selected_models}")
                 for model in selected_models:
                     lambda_arn = TARGETS[model]
+                    task_id = generate_task_id()
                     trigger_lambda(
                         lambda_arn, 
                         {
@@ -461,7 +599,9 @@ def process_queries_data(selected_queries, options, job_id):
                             "product_id": product_id
                         }, 
                         job_id,
-                        query_id
+                        query_id,
+                        session_id,
+                        task_id
                     )
             else:
                 # Fan-out to all models
@@ -475,6 +615,7 @@ def process_queries_data(selected_queries, options, job_id):
                 })
                 
                 for key, arn in TARGETS.items():
+                    task_id = generate_task_id()
                     trigger_lambda(
                         arn,
                         {
@@ -484,7 +625,9 @@ def process_queries_data(selected_queries, options, job_id):
                             "product_id": product_id
                         },
                         job_id,
-                        query_id
+                        query_id,
+                        session_id,
+                        task_id
                     )
                 
                 orchestration_logger.log_event(job_id, "FanoutCompleted", {
@@ -515,6 +658,7 @@ def process_queries_data(selected_queries, options, job_id):
         "status": "accepted",
         "message": "Job submitted successfully. All lambdas have been triggered.",
         "job_id": job_id,
+        "session_id": session_id,
         "product_groups_count": len(selected_queries),
         "total_queries_count": total_queries,
         "polling_info": {
@@ -589,7 +733,9 @@ def main():
                 print(json.dumps({"error": f"Invalid input format: {e}"}))
                 sys.exit(1)
         
-        if not selected_queries:
+        # For retry requests, we don't need selected_queries since we're retrying existing tasks
+        is_retry = options.get('retry', False)
+        if not selected_queries and not is_retry:
             logger.error("No selected_queries provided")
             print(json.dumps({"error": "No selected_queries provided"}))
             sys.exit(1)

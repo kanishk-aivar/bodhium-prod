@@ -381,9 +381,15 @@ def get_model_name_from_arn(lambda_arn: str) -> str:
     
     return model_mapping.get(function_name, function_name.replace("bodhium-llm-", "").title())
 
-def trigger_lambda(lambda_arn, payload_dict, job_id: str, query_id: int = None):
+def trigger_lambda(lambda_arn, payload_dict, job_id: str, query_id: int = None, session_id: str = None, task_id: str = None):
     """Trigger lambda without waiting for response - replicated from main orchestrator"""
     try:
+        # Add session_id and task_id to payload if provided
+        if session_id and "session_id" not in payload_dict:
+            payload_dict["session_id"] = session_id
+        if task_id and "task_id" not in payload_dict:
+            payload_dict["task_id"] = task_id
+            
         model_name = get_model_name_from_arn(lambda_arn)
         
         # Map lambda ARN to model key
@@ -400,7 +406,9 @@ def trigger_lambda(lambda_arn, payload_dict, job_id: str, query_id: int = None):
             "lambda_arn": lambda_arn,
             "function_name": lambda_arn.split(":")[-1],
             "payload_size": len(str(payload)),
-            "query_id": query_id
+            "query_id": query_id,
+            "session_id": session_id,
+            "task_id": task_id
         })
         
         # Trigger lambda asynchronously (Event invocation type)
@@ -420,26 +428,34 @@ def trigger_lambda(lambda_arn, payload_dict, job_id: str, query_id: int = None):
             "lambda_arn": lambda_arn,
             "function_name": lambda_arn.split(":")[-1],
             "error": str(e),
-            "query_id": query_id
+            "query_id": query_id,
+            "session_id": session_id,
+            "task_id": task_id
         })
         return False
 
 
 def process_queries(job_id, query_objs, options, static_product_id=None, start_time=None):
+    # Generate session_id for adhoc orchestrator
+    session_id = str(uuid.uuid4())
+    logger.info(f"Generated session_id for adhoc orchestrator: {session_id}")
+    
     # Log processing start with product information
     orchestration_logger.log_event(job_id, "ProductProcessingStarted", {
         "product_id": static_product_id,
         "query_count": len(query_objs),
         "existing_queries_count": 0,  # No existing queries in Adhoc mode
         "new_queries_count": len(query_objs),
-        "old_format_queries_count": 0  # Using new format
+        "old_format_queries_count": 0,  # Using new format
+        "session_id": session_id
     })
     
     orchestration_logger.log_event(job_id, "AsyncProcessingStarted", {
         "queries_count": len(query_objs),
         "options": options,
         "mode": "Adhoc_trigger",
-        "status": "processing"
+        "status": "processing",
+        "session_id": session_id
     })
     results = []
     for i, query_obj in enumerate(query_objs):
@@ -490,13 +506,14 @@ def process_queries(job_id, query_objs, options, static_product_id=None, start_t
         
         for key, arn in TARGETS.items():
             model_keys_fanned_out.append(key)
+            task_id = str(uuid.uuid4())
             payload = {
                 "query": q,
                 "job_id": job_id,
                 "query_id": query_id,
                 "product_id": product_id
             }
-            success = trigger_lambda(arn, payload, job_id, query_id)
+            success = trigger_lambda(arn, payload, job_id, query_id, session_id, task_id)
             fanout_results.append({"function": key, "status": "invoked" if success else "failed"})
         
         orchestration_logger.log_event(job_id, "FanoutCompleted", {

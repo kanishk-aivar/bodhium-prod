@@ -1144,16 +1144,38 @@ def get_product_name_from_db(product_id):
         logger.error(f"Error fetching product name for product_id {product_id}: {e}")
         return 'Unknown Product'
 
-def create_llm_task(job_id, query_id, llm_model_name="google-ai-overview", product_id=None, product_name=None):
-    logger.info(f"Creating LLM task for job_id: {job_id}, query_id: {query_id}")
+def create_llm_task(job_id, query_id, llm_model_name="google-ai-overview", product_id=None, product_name=None, session_id=None, task_id=None):
+    logger.info(f"Creating LLM task for job_id: {job_id}, query_id: {query_id}, session_id: {session_id}")
     
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        task_id = str(uuid.uuid4())
-        # Use query_id directly as integer (matches crawlforai.py pattern)
+        # Use provided task_id or generate new one
+        if not task_id:
+            task_id = str(uuid.uuid4())
         
+        # Check if task_id already exists (for retry scenarios)
+        if session_id:
+            cursor.execute(
+                "SELECT status FROM llmtasks WHERE task_id = %s",
+                (task_id,)
+            )
+            existing_task = cursor.fetchone()
+            
+            if existing_task:
+                # Task exists, update status to "retrying"
+                cursor.execute(
+                    "UPDATE llmtasks SET status = %s, session_id = %s WHERE task_id = %s",
+                    ("retrying", session_id, task_id)
+                )
+                conn.commit()
+                cursor.close()
+                conn.close()
+                logger.info(f"Updated existing task {task_id} to retrying status")
+                return task_id
+        
+        # Insert new task
         cursor.execute(
             """
             INSERT INTO llmtasks (
@@ -1164,8 +1186,9 @@ def create_llm_task(job_id, query_id, llm_model_name="google-ai-overview", produ
                 status,
                 created_at,
                 product_id,
-                product_name
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                product_name,
+                session_id
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 task_id,
@@ -1175,7 +1198,8 @@ def create_llm_task(job_id, query_id, llm_model_name="google-ai-overview", produ
                 "created",
                 datetime.now(timezone.utc),
                 product_id,
-                product_name
+                product_name,
+                session_id
             )
         )
         
@@ -1183,7 +1207,7 @@ def create_llm_task(job_id, query_id, llm_model_name="google-ai-overview", produ
         cursor.close()
         conn.close()
         
-        logger.info(f"Inserted LLM task to DB -- task_id: {task_id}")
+        logger.info(f"Inserted LLM task to DB -- task_id: {task_id}, session_id: {session_id}")
         return task_id
         
     except Exception as e:
@@ -1216,6 +1240,10 @@ def update_task_status(task_id, status, error_message=None, s3_output_path=None,
         query = f"UPDATE llmtasks SET {', '.join(update_fields)} WHERE task_id = %s"
         cursor.execute(query, params)
         
+        # If task failed, also create a record in failed_tasks
+        if status == "failed" and error_message:
+            create_failed_task_record(task_id, error_message)
+        
         conn.commit()
         cursor.close()
         conn.close()
@@ -1227,6 +1255,51 @@ def update_task_status(task_id, status, error_message=None, s3_output_path=None,
         print(f"❌ Failed to update task status in RDS: {e}")
         # Match crawlforai.py pattern - raise the exception
         raise
+
+def create_failed_task_record(task_id, error_message):
+    """Create a record in failed_tasks table when a task fails"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Get task details from llmtasks
+        cursor.execute(
+            """
+            SELECT session_id, job_id, query_id, llm_model_name, status, s3_output_path, 
+                   created_at, completed_at, product_name, product_id
+            FROM llmtasks 
+            WHERE task_id = %s
+            """,
+            (task_id,)
+        )
+        
+        task_data = cursor.fetchone()
+        if task_data:
+            session_id, job_id, query_id, llm_model_name, status, s3_output_path, created_at, completed_at, product_name, product_id = task_data
+            
+            # Insert into failed_tasks
+            cursor.execute(
+                """
+                INSERT INTO failed_tasks (
+                    task_id, session_id, job_id, query_id, llm_model_name, status,
+                    s3_output_path, error_message, created_at, completed_at, product_name, product_id
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    task_id, session_id, job_id, query_id, llm_model_name, status,
+                    s3_output_path, error_message, created_at, completed_at, product_name, product_id
+                )
+            )
+            
+            logger.info(f"Created failed_tasks record for task {task_id}")
+        
+        conn.commit()
+        cursor.close()
+        conn.close()
+        
+    except Exception as e:
+        logger.error(f"Error creating failed_tasks record: {e}")
+        # Don't raise - this is not critical for the main flow
 
 def log_orchestration_event(job_id, event_name, details=None):
     """Log an orchestration event to DynamoDB."""
@@ -1395,8 +1468,10 @@ def lambda_handler(event, context):
         job_id = event.get('job_id', str(uuid.uuid4()))
         query_id = event.get('query_id', 1)  # Default to integer like crawlforai.py
         product_id = event.get('product_id', str(uuid.uuid4()))  # NEW: Extract product_id
+        session_id = event.get('session_id')  # NEW: Extract session_id
+        provided_task_id = event.get('task_id')  # NEW: Extract provided task_id
         
-        print(f"📊 Job ID: {job_id}, Query ID: {query_id}, Product ID: {product_id}")
+        print(f"📊 Job ID: {job_id}, Query ID: {query_id}, Product ID: {product_id}, Session ID: {session_id}")
         
         # Get product name from database
         product_name = get_product_name_from_db(product_id) if product_id else 'Unknown Product'
@@ -1407,6 +1482,7 @@ def lambda_handler(event, context):
                 "query": query,
                 "task_id": None,  # Will be updated later if task creation succeeds
                 "product_id": product_id,  # NEW: Include product_id in logging
+                "session_id": session_id,  # NEW: Include session_id in logging
                 "pipeline": "google_ai_overview_extraction",
                 "timestamp": datetime.now().isoformat()
             })
@@ -1415,7 +1491,7 @@ def lambda_handler(event, context):
         
         # Database operations
         try:
-            task_id = create_llm_task(job_id, query_id, "GOOGLE_AI_OVERVIEW", product_id, product_name)
+            task_id = create_llm_task(job_id, query_id, "GOOGLE_AI_OVERVIEW", product_id, product_name, session_id, provided_task_id)
             if task_id:
                 update_task_status(task_id, "running")
                 # Update orchestration event with task_id
@@ -1423,6 +1499,7 @@ def lambda_handler(event, context):
                     "query": query,
                     "task_id": task_id,
                     "product_id": product_id,  # NEW: Include product_id in logging
+                    "session_id": session_id,  # NEW: Include session_id in logging
                     "pipeline": "google_ai_overview_extraction",
                     "timestamp": datetime.now().isoformat()
                 })

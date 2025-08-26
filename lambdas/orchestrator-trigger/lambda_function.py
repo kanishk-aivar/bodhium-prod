@@ -61,6 +61,52 @@ def log_event(job_id, event_name, details=None):
     except Exception as e:
         logger.error(f"Failed to log event: {e}")
 
+def validate_retry_request(session_id, retry_tasks=None):
+    """Validate that a retry request has valid session_id and retry_tasks"""
+    try:
+        # For now, we'll just validate that session_id is a valid UUID
+        # In a production environment, you might want to check the database
+        # to ensure there are actually failed tasks for this session
+        uuid.UUID(session_id)
+        
+        # If retry_tasks is provided, validate the structure
+        if retry_tasks:
+            if not isinstance(retry_tasks, list):
+                return False
+            
+            for task in retry_tasks:
+                if not isinstance(task, dict):
+                    return False
+                
+                # Validate required fields for each retry task
+                required_fields = ['task_id', 'model', 'query_id', 'product_id']
+                for field in required_fields:
+                    if field not in task:
+                        return False
+                
+                # Validate task_id is a valid UUID
+                try:
+                    uuid.UUID(task['task_id'])
+                except ValueError:
+                    return False
+                
+                # Validate model is one of the supported models
+                supported_models = ['chatgpt', 'aio', 'aim', 'perplexity']
+                if task['model'] not in supported_models:
+                    return False
+                
+                # Validate query_id and product_id are integers or strings that can be converted to integers
+                try:
+                    int(task['query_id'])
+                    int(task['product_id'])
+                except (ValueError, TypeError):
+                    return False
+        
+        return True
+    except ValueError:
+        logger.error(f"Invalid session_id format: {session_id}")
+        return False
+
 
 def lambda_handler(event, context):
     """Lambda handler for API Gateway events"""
@@ -88,6 +134,24 @@ def lambda_handler(event, context):
                 
                 logger.info(f"Using job_id from UI: {job_id}")
                 
+                # NEW FORMAT: Check for selected_queries
+                selected_queries = body.get("selected_queries")
+                options = body.get("options", {})
+                
+                # Check if this is a retry request
+                is_retry = options.get('retry', False)
+                session_id = options.get('session_id')
+                
+                if is_retry and session_id:
+                    logger.info(f"Processing retry request with session_id: {session_id}")
+                    # For retry requests, we need to validate that the session_id exists
+                    # and that there are failed tasks to retry
+                    retry_tasks = options.get('retry_tasks')
+                    if not validate_retry_request(session_id, retry_tasks):
+                        raise ValueError(f"Invalid retry request: session_id {session_id} not found or invalid retry_tasks")
+                elif is_retry and not session_id:
+                    raise ValueError("retry=true requires session_id in options")
+                
                 # Log the trigger event after job_id is extracted
                 log_event(job_id, "BatchTriggerStarted", {
                     "event": event,
@@ -99,12 +163,10 @@ def lambda_handler(event, context):
                         "remaining_time_in_millis": context.get_remaining_time_in_millis()
                     },
                     "mode": "Batch_trigger",
-                    "status": "created"
+                    "status": "created",
+                    "is_retry": is_retry,
+                    "session_id": session_id
                 })
-                
-                # NEW FORMAT: Check for selected_queries
-                selected_queries = body.get("selected_queries")
-                options = body.get("options", {})
                 
                 # BACKWARDS COMPATIBILITY: Support old format
                 if not selected_queries:
@@ -123,6 +185,28 @@ def lambda_handler(event, context):
                 
                 logger.info(f"Using job_id from direct invocation: {job_id}")
                 
+                selected_queries = event.get("selected_queries")
+                if not selected_queries:
+                    queries = event.get("query") or event.get("queries")
+                    if queries:
+                        selected_queries = [{
+                            "product_id": str(uuid.uuid4()),
+                            "queries": queries if isinstance(queries, list) else [queries]
+                        }]
+                options = event.get("options", {})
+                
+                # Check if this is a retry request
+                is_retry = options.get('retry', False)
+                session_id = options.get('session_id')
+                
+                if is_retry and session_id:
+                    logger.info(f"Processing retry request with session_id: {session_id}")
+                    retry_tasks = options.get('retry_tasks')
+                    if not validate_retry_request(session_id, retry_tasks):
+                        raise ValueError(f"Invalid retry request: session_id {session_id} not found or invalid retry_tasks")
+                elif is_retry and not session_id:
+                    raise ValueError("retry=true requires session_id in options")
+                
                 # Log the trigger event after job_id is extracted
                 log_event(job_id, "BatchTriggerStarted", {
                     "event": event,
@@ -134,18 +218,10 @@ def lambda_handler(event, context):
                         "remaining_time_in_millis": context.get_remaining_time_in_millis()
                     },
                     "mode": "Batch_trigger",
-                    "status": "created"
+                    "status": "created",
+                    "is_retry": is_retry,
+                    "session_id": session_id
                 })
-                
-                selected_queries = event.get("selected_queries")
-                if not selected_queries:
-                    queries = event.get("query") or event.get("queries")
-                    if queries:
-                        selected_queries = [{
-                            "product_id": str(uuid.uuid4()),
-                            "queries": queries if isinstance(queries, list) else [queries]
-                        }]
-                options = event.get("options", {})
         except (json.JSONDecodeError, AttributeError) as e:
             logger.error(f"Failed to parse request body: {e}")
             log_event(job_id, "BatchTriggerFailed", {
@@ -163,7 +239,8 @@ def lambda_handler(event, context):
                 'body': json.dumps({"error": "Invalid JSON in request body"})
             }
 
-        if not selected_queries:
+        # For retry requests, we don't need selected_queries since we're retrying existing tasks
+        if not selected_queries and not is_retry:
             logger.warning("No selected_queries provided in the event.")
             log_event(job_id, "BatchTriggerFailed", {
                 "error": "No selected_queries provided in the event",
@@ -185,8 +262,11 @@ def lambda_handler(event, context):
         job_name = f"llm-orchestrator-{timestamp}-{job_id[:8]}"
         
         # Prepare batch job parameters
+        # For retry requests, selected_queries might be None
+        selected_queries_json = json.dumps(selected_queries) if selected_queries else json.dumps([])
+        
         job_parameters = {
-            'selected_queries': json.dumps(selected_queries),
+            'selected_queries': selected_queries_json,
             'options': json.dumps(options),
             'job_id': job_id,
             'triggered_at': datetime.now(timezone.utc).isoformat()
@@ -257,9 +337,11 @@ def lambda_handler(event, context):
             "batch_job_name": job_name,
             "job_queue": BATCH_JOB_QUEUE,
             "job_definition": BATCH_JOB_DEFINITION,
-            "selected_queries_count": len(selected_queries),
+            "selected_queries_count": len(selected_queries) if selected_queries else 0,
             "parameters": job_parameters,
-            "status": "submitted"
+            "status": "submitted",
+            "is_retry": is_retry,
+            "session_id": session_id
         })
         
         logger.info(f"Successfully submitted batch job: {batch_job_id}")
@@ -279,8 +361,10 @@ def lambda_handler(event, context):
                 'job_id': job_id,
                 'batch_job_id': batch_job_id,
                 'batch_job_name': job_name,
-                'selected_queries_count': len(selected_queries),
+                'selected_queries_count': len(selected_queries) if selected_queries else 0,
                 'mode': 'Batch_trigger',
+                'is_retry': is_retry,
+                'session_id': session_id,
                 'polling_info': {
                     'batch_job_id': batch_job_id,
                     'job_queue': BATCH_JOB_QUEUE,

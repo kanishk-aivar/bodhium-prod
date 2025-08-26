@@ -108,12 +108,37 @@ def get_product_name_from_db(product_id):
         logger.error(f"Error fetching product name for product_id {product_id}: {e}")
         return 'Unknown Product'
 
-def create_llm_task(job_id: str, query_id: str, llm_model_name: str = "perplexity", product_id: str = None, product_name: str = None) -> str:
-    logger.info(f"Creating LLM task for job_id: {job_id}, query_id: {query_id}")
+def create_llm_task(job_id: str, query_id: str, llm_model_name: str = "perplexity", product_id: str = None, product_name: str = None, session_id: str = None, task_id: str = None) -> str:
+    logger.info(f"Creating LLM task for job_id: {job_id}, query_id: {query_id}, session_id: {session_id}")
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        task_id = str(uuid.uuid4())
+        
+        # Use provided task_id or generate new one
+        if not task_id:
+            task_id = str(uuid.uuid4())
+        
+        # Check if task_id already exists (for retry scenarios)
+        if session_id:
+            cursor.execute(
+                "SELECT status FROM llmtasks WHERE task_id = %s",
+                (task_id,)
+            )
+            existing_task = cursor.fetchone()
+            
+            if existing_task:
+                # Task exists, update status to "retrying"
+                cursor.execute(
+                    "UPDATE llmtasks SET status = %s, session_id = %s WHERE task_id = %s",
+                    ("retrying", session_id, task_id)
+                )
+                conn.commit()
+                cursor.close()
+                conn.close()
+                logger.info(f"Updated existing task {task_id} to retrying status")
+                return task_id
+        
+        # Insert new task
         cursor.execute(
             """
             INSERT INTO llmtasks (
@@ -124,8 +149,9 @@ def create_llm_task(job_id: str, query_id: str, llm_model_name: str = "perplexit
                 status,
                 created_at,
                 product_id,
-                product_name
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                product_name,
+                session_id
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 task_id,
@@ -135,13 +161,14 @@ def create_llm_task(job_id: str, query_id: str, llm_model_name: str = "perplexit
                 "created",
                 dt.now(timezone.utc),
                 product_id,
-                product_name
+                product_name,
+                session_id
             )
         )
         conn.commit()
         cursor.close()
         conn.close()
-        logger.info(f"Inserted LLM task to DB -- task_id: {task_id}, job_id: {job_id}, query_id: {query_id}")
+        logger.info(f"Inserted LLM task to DB -- task_id: {task_id}, job_id: {job_id}, query_id: {query_id}, session_id: {session_id}")
         return task_id
     except psycopg2.IntegrityError as e:
         logger.error(f"Integrity error creating LLM task: {e}")
@@ -185,6 +212,11 @@ def update_task_status(task_id: str, status: str, error_message: Optional[str] =
         params.append(task_id)
         query = f"UPDATE llmtasks SET {', '.join(update_fields)} WHERE task_id = %s"
         cursor.execute(query, params)
+        
+        # If task failed, also create a record in failed_tasks
+        if status == "failed" and error_message:
+            create_failed_task_record(task_id, error_message)
+        
         conn.commit()
         cursor.close()
         conn.close()
@@ -203,8 +235,53 @@ def update_task_status(task_id: str, status: str, error_message: Optional[str] =
             logger.info(f"Updated task {task_id} status to {status} (simplified)")
             return True
         except Exception as e2:
-            logger.error(f"Failed to update task status even with simplified query: {e2}")
-            return False
+                    logger.error(f"Failed to update task status even with simplified query: {e2}")
+        return False
+
+def create_failed_task_record(task_id: str, error_message: str):
+    """Create a record in failed_tasks table when a task fails"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Get task details from llmtasks
+        cursor.execute(
+            """
+            SELECT session_id, job_id, query_id, llm_model_name, status, s3_output_path, 
+                   created_at, completed_at, product_name, product_id
+            FROM llmtasks 
+            WHERE task_id = %s
+            """,
+            (task_id,)
+        )
+        
+        task_data = cursor.fetchone()
+        if task_data:
+            session_id, job_id, query_id, llm_model_name, status, s3_output_path, created_at, completed_at, product_name, product_id = task_data
+            
+            # Insert into failed_tasks
+            cursor.execute(
+                """
+                INSERT INTO failed_tasks (
+                    task_id, session_id, job_id, query_id, llm_model_name, status,
+                    s3_output_path, error_message, created_at, completed_at, product_name, product_id
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    task_id, session_id, job_id, query_id, llm_model_name, status,
+                    s3_output_path, error_message, created_at, completed_at, product_name, product_id
+                )
+            )
+            
+            logger.info(f"Created failed_tasks record for task {task_id}")
+        
+        conn.commit()
+        cursor.close()
+        conn.close()
+        
+    except Exception as e:
+        logger.error(f"Error creating failed_tasks record: {e}")
+        # Don't raise - this is not critical for the main flow
 
 # -------- Perplexity API --------
 
@@ -430,9 +507,11 @@ def lambda_handler(event, context):
         job_id = event.get('job_id')
         query_id = event.get('query_id', 1)  # Default to integer like other lambdas
         product_id = event.get('product_id')
+        session_id = event.get('session_id')  # NEW: Extract session_id
+        provided_task_id = event.get('task_id')  # NEW: Extract provided task_id
         user_query = event.get('query')
 
-        print(f"📊 Job ID: {job_id}, Query ID: {query_id}, Product ID: {product_id}")
+        print(f"📊 Job ID: {job_id}, Query ID: {query_id}, Product ID: {product_id}, Session ID: {session_id}")
         
         # Get product name from database
         product_name = get_product_name_from_db(product_id) if product_id else 'Unknown Product'
@@ -468,6 +547,7 @@ def lambda_handler(event, context):
                 "query": user_query,
                 "task_id": None,  # Will be updated later if task creation succeeds
                 "product_id": product_id,  # Include product_id in logging
+                "session_id": session_id,  # NEW: Include session_id in logging
                 "pipeline": "perplexity_api_extraction",
                 "timestamp": dt.now().isoformat()
             })
@@ -478,13 +558,14 @@ def lambda_handler(event, context):
 
         # Database operations
         try:
-            task_id = create_llm_task(job_id, query_id, "perplexity", product_id, product_name)
+            task_id = create_llm_task(job_id, query_id, "perplexity", product_id, product_name, session_id, provided_task_id)
             logger.info(f"LLM task created and stored -- task_id: {task_id}, job_id: {job_id}, query_id: {query_id}")
             # Update orchestration event with task_id
             log_orchestration_event(job_id, "task_created", {
                 "query": user_query,
                 "task_id": task_id,
                 "product_id": product_id,  # Include product_id in logging
+                "session_id": session_id,  # NEW: Include session_id in logging
                 "pipeline": "perplexity_api_extraction",
                 "timestamp": dt.now().isoformat()
             })

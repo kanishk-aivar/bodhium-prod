@@ -18,10 +18,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
 COPY app.py .
-COPY test_batch.py .
 
 # Make scripts executable
-RUN chmod +x app.py test_batch.py
+RUN chmod +x app.py
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1

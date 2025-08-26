@@ -22,7 +22,6 @@ import urllib.parse
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-# === ADDED: INTELLIGENT ANSWER BLOCK START EXTRACTION ===
 def extract_real_aimode_answer(markdown_text):
     """Extract the real AI Mode answer by identifying start patterns"""
     # Patterns to mark start of actual answer block
@@ -714,29 +713,52 @@ class GoogleAIModeExtractor:
                     self.log('🔧 Step 9: FIXED - Processing HTML with Crawl4AI using file-based approach...')
                     
                     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-                    markdown_result = await self._process_html_with_crawl4ai_file_based(
-                        final_html, query, page.url, timestamp
-                    )
-                    
-                    if not markdown_result:
-                        raise Exception("Crawl4AI failed to process AI Mode HTML")
+                    try:
+                        markdown_result = await self._process_html_with_crawl4ai_file_based(
+                            final_html, query, page.url, timestamp
+                        )
+                        
+                        if not markdown_result:
+                            raise Exception("Crawl4AI failed to process AI Mode HTML")
+                            
+                    except Exception as crawl4ai_error:
+                        self.log(f"❌ Crawl4AI processing failed: {crawl4ai_error}")
+                        # Clean up and stop execution immediately
+                        raise Exception(f"Crawl4AI processing failed: {crawl4ai_error}  - STOPPING EXECUTION")
                     
                     # STEP 10: Save results with enhanced output and intelligent filtering
-                    success = await self._save_enhanced_crawl4ai_results_intelligent(
-                        query, final_html, markdown_result, results, timestamp, page.url
-                    )
+                    try:
+                        success = await self._save_enhanced_crawl4ai_results_intelligent(
+                            query, final_html, markdown_result, results, timestamp, page.url
+                        )
+                        
+                        if not success:
+                            raise Exception("Failed to save enhanced results")
+                            
+                    except Exception as save_error:
+                        self.log(f"❌ Failed to save results: {save_error}")
+                        raise Exception(f"Failed to save results: {save_error} - STOPPING EXECUTION")
                     
-                    if success:
-                        results['success'] = True
-                        results['retry_count'] = retry_count
-                        self.log(f"🎉 Successfully completed ENHANCED AI Mode extraction with {results['navigation_method']} method!")
-                        return results
-                    else:
-                        raise Exception("Failed to save enhanced results")
+                    results['success'] = True
+                    results['retry_count'] = retry_count
+                    self.log(f"🎉 Successfully completed ENHANCED AI Mode extraction with {results['navigation_method']} method!")
+                    return results
                     
                 except Exception as e:
-                    self.log(f"❌ Attempt {retry_count + 1} failed: {str(e)}")
-                    if "CAPTCHA" in str(e) and retry_count < max_retries:
+                    error_msg = str(e)
+                    self.log(f"❌ Attempt {retry_count + 1} failed: {error_msg}")
+                    
+                    # Check for Crawl4AI errors and stop immediately
+                    if any(keyword in error_msg.lower() for keyword in ['crawl4ai', 'undefined', 'stopping execution']):
+                        self.log(f"🚨 FAILURE DETECTED: {error_msg}")
+                        self.log("🛑 STOPPING EXECUTION - This is not a retryable error")
+                        results['error'] = f"FAILURE: {error_msg}"
+                        results['retry_count'] = retry_count
+                        results['failure_type'] = 'hard_failure'
+                        return results
+                    
+                    # Only retry for CAPTCHA or network-related issues
+                    if "CAPTCHA" in error_msg and retry_count < max_retries:
                         self.log(f"🔄 CAPTCHA detected, retrying with new session (attempt {retry_count + 2})...")
                         retry_count += 1
                         wait_time = random.uniform(30, 60) * (retry_count + 1)
@@ -745,8 +767,9 @@ class GoogleAIModeExtractor:
                         self.session_id = str(uuid.uuid4())
                         continue
                     else:
-                        results['error'] = str(e)
+                        results['error'] = error_msg
                         results['retry_count'] = retry_count
+                        results['failure_type'] = 'soft_failure'
                         return results
                         
                 finally:
@@ -811,7 +834,8 @@ class GoogleAIModeExtractor:
         This ensures Crawl4AI processes the exact HTML extracted by Playwright.
         """
         if not CRAWL4AI_AVAILABLE:
-            return None
+            self.log("❌ Crawl4AI not available")
+            raise Exception("Crawl4AI not available")
         
         try:
             self.log("🔧 FIXED - Using file-based Crawl4AI processing like brightdata.py...")
@@ -887,7 +911,23 @@ class GoogleAIModeExtractor:
                 if not (result and result.success and result.markdown):
                     error_msg = getattr(result, 'error_message', 'Unknown error') if result else 'No result returned'
                     self.log(f"❌ Crawl4AI processing failed: {error_msg}")
-                    return None
+                    
+                    # Check for specific "undefined" error and other common issues
+                    if 'undefined' in str(error_msg).lower():
+                        try:
+                            if os.path.exists(temp_html_path):
+                                os.remove(temp_html_path)
+                        except:
+                            pass
+                        raise Exception(f"Crawl4AI 'undefined' parsing error detected: {error_msg} - This indicates incomplete page content or parsing issues")
+                    
+                    # Clean up and raise exception for any other failure
+                    try:
+                        if os.path.exists(temp_html_path):
+                            os.remove(temp_html_path)
+                    except:
+                        pass
+                    raise Exception(f"Crawl4AI processing failed: {error_msg}")
                 
                 # Extract raw markdown from Crawl4AI
                 raw_md = (
@@ -895,6 +935,15 @@ class GoogleAIModeExtractor:
                     if hasattr(result.markdown, 'raw_markdown') 
                     else str(result.markdown)
                 ).strip()
+                
+                if not raw_md or len(raw_md) < 100:
+                    # Insufficient content extracted
+                    try:
+                        if os.path.exists(temp_html_path):
+                            os.remove(temp_html_path)
+                    except:
+                        pass
+                    raise Exception(f"Crawl4AI extracted insufficient content ({len(raw_md)} chars)")
                 
                 self.log(f"✅ Crawl4AI extracted markdown from file ({len(raw_md)} characters)")
                 
@@ -941,7 +990,8 @@ class GoogleAIModeExtractor:
                     os.remove(temp_html_path)
             except:
                 pass
-            return None
+            # Re-raise the exception to stop execution
+            raise Exception(f"Crawl4AI processing failed: {str(e)}")
 
     # === MODIFIED: SAVE FUNCTION WITH INTELLIGENT CONTENT EXTRACTION AND LINK FIXES ===
     async def _save_enhanced_crawl4ai_results_intelligent(self, query, final_html, markdown_data, results, timestamp, page_url):
@@ -1399,16 +1449,38 @@ def get_product_name_from_db(product_id):
         logger.error(f"Error fetching product name for product_id {product_id}: {e}")
         return 'Unknown Product'
 
-def create_llm_task(job_id, query_id, llm_model_name="ai-mode", product_id=None, product_name=None):
-    logger.info(f"Creating LLM task for job_id: {job_id}, query_id: {query_id}")
+def create_llm_task(job_id, query_id, llm_model_name="ai-mode", product_id=None, product_name=None, session_id=None, task_id=None):
+    logger.info(f"Creating LLM task for job_id: {job_id}, query_id: {query_id}, session_id: {session_id}")
     
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        task_id = str(uuid.uuid4())
-        # Use query_id directly as integer (matches ChatGPT worker pattern)
+        # Use provided task_id or generate new one
+        if not task_id:
+            task_id = str(uuid.uuid4())
         
+        # Check if task_id already exists (for retry scenarios)
+        if session_id:
+            cursor.execute(
+                "SELECT status FROM llmtasks WHERE task_id = %s",
+                (task_id,)
+            )
+            existing_task = cursor.fetchone()
+            
+            if existing_task:
+                # Task exists, update status to "retrying"
+                cursor.execute(
+                    "UPDATE llmtasks SET status = %s, session_id = %s WHERE task_id = %s",
+                    ("retrying", session_id, task_id)
+                )
+                conn.commit()
+                cursor.close()
+                conn.close()
+                logger.info(f"Updated existing task {task_id} to retrying status")
+                return task_id
+        
+        # Insert new task
         cursor.execute(
             """
             INSERT INTO llmtasks (
@@ -1419,8 +1491,9 @@ def create_llm_task(job_id, query_id, llm_model_name="ai-mode", product_id=None,
                 status,
                 created_at,
                 product_id,
-                product_name
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                product_name,
+                session_id
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             """,
             (
                 task_id,
@@ -1430,7 +1503,8 @@ def create_llm_task(job_id, query_id, llm_model_name="ai-mode", product_id=None,
                 "created",
                 datetime.now(timezone.utc),
                 product_id,
-                product_name
+                product_name,
+                session_id
             )
         )
         
@@ -1438,7 +1512,7 @@ def create_llm_task(job_id, query_id, llm_model_name="ai-mode", product_id=None,
         cursor.close()
         conn.close()
         
-        logger.info(f"Inserted LLM task to DB -- task_id: {task_id}")
+        logger.info(f"Inserted LLM task to DB -- task_id: {task_id}, session_id: {session_id}")
         return task_id
         
     except Exception as e:
@@ -1470,6 +1544,10 @@ def update_task_status(task_id, status, error_message=None, s3_output_path=None,
         query = f"UPDATE llmtasks SET {', '.join(update_fields)} WHERE task_id = %s"
         cursor.execute(query, params)
         
+        # If task failed, also create a record in failed_tasks
+        if status == "failed" and error_message:
+            create_failed_task_record(task_id, error_message)
+        
         conn.commit()
         cursor.close()
         conn.close()
@@ -1479,6 +1557,51 @@ def update_task_status(task_id, status, error_message=None, s3_output_path=None,
     except Exception as e:
         logger.error(f"Error updating task status: {e}")
         raise
+
+def create_failed_task_record(task_id, error_message):
+    """Create a record in failed_tasks table when a task fails"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Get task details from llmtasks
+        cursor.execute(
+            """
+            SELECT session_id, job_id, query_id, llm_model_name, status, s3_output_path, 
+                   created_at, completed_at, product_name, product_id
+            FROM llmtasks 
+            WHERE task_id = %s
+            """,
+            (task_id,)
+        )
+        
+        task_data = cursor.fetchone()
+        if task_data:
+            session_id, job_id, query_id, llm_model_name, status, s3_output_path, created_at, completed_at, product_name, product_id = task_data
+            
+            # Insert into failed_tasks
+            cursor.execute(
+                """
+                INSERT INTO failed_tasks (
+                    task_id, session_id, job_id, query_id, llm_model_name, status,
+                    s3_output_path, error_message, created_at, completed_at, product_name, product_id
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    task_id, session_id, job_id, query_id, llm_model_name, status,
+                    s3_output_path, error_message, created_at, completed_at, product_name, product_id
+                )
+            )
+            
+            logger.info(f"Created failed_tasks record for task {task_id}")
+        
+        conn.commit()
+        cursor.close()
+        conn.close()
+        
+    except Exception as e:
+        logger.error(f"Error creating failed_tasks record: {e}")
+        # Don't raise - this is not critical for the main flow
 
 def log_orchestration_event(job_id, event_name, details=None):
     """Log an orchestration event to DynamoDB."""
@@ -1674,15 +1797,17 @@ def lambda_handler(event, context):
         job_id = event.get('job_id', str(uuid.uuid4()))
         query_id = event.get('query_id', 1)  # Default to integer like ChatGPT worker
         product_id = event.get('product_id', str(uuid.uuid4()))  # NEW: Extract product_id
+        session_id = event.get('session_id')  # NEW: Extract session_id
+        provided_task_id = event.get('task_id')  # NEW: Extract provided task_id
         
-        print(f"📊 Job ID: {job_id}, Query ID: {query_id}, Product ID: {product_id}")
+        print(f"📊 Job ID: {job_id}, Query ID: {query_id}, Product ID: {product_id}, Session ID: {session_id}")
         
         # Get product name from database
         product_name = get_product_name_from_db(product_id) if product_id else 'Unknown Product'
         
         # Database operations
         try:
-            task_id = create_llm_task(job_id, query_id, "GOOGLE_AI_MODE", product_id, product_name)
+            task_id = create_llm_task(job_id, query_id, "GOOGLE_AI_MODE", product_id, product_name, session_id, provided_task_id)
             update_task_status(task_id, "running")
         except Exception as db_error:
             print(f"⚠️ Database operations failed: {db_error}")
@@ -1812,9 +1937,18 @@ def lambda_handler(event, context):
                 }
             }
         else:
+            # Check if this was a hard failure
+            failure_type = result.get('failure_type', 'unknown') if result else 'unknown'
+            status_code = 500
+            
+            if failure_type == 'hard_failure':
+                status_code = 400  # Bad Request for hard failures
+                print(f"🚨 FAILURE DETECTED: {result.get('error', 'Unknown failure')}")
+                print("🛑 This is not a retryable error - the system should stop processing")
+            
             return {
-                'statusCode': 500,
-                'body': json.dumps(result or {'error': 'Unknown error'}),
+                'statusCode': status_code,
+                'body': json.dumps(result or {'error': 'Unknown error', 'failure_type': 'unknown'}, default=str),
                 'headers': {
                     'Content-Type': 'application/json',
                     'Access-Control-Allow-Origin': '*'

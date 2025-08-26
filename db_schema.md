@@ -154,7 +154,7 @@ CREATE INDEX idx_queries_is_active ON queries (is_active);
 #### 4\. `llmtasks` Table
 
 **Documentation 📜**
-The `llmtasks` table tracks the status and results of tasks executed by Large Language Models (LLMs). These tasks are typically associated with specific scraping jobs and product queries, and store information about the LLM used, its output, and any errors.
+The `llmtasks` table tracks the status and results of tasks executed by Large Language Models (LLMs). These tasks are typically associated with specific scraping jobs and product queries, and store information about the LLM used, its output, and any errors. The table now includes session tracking for grouping related tasks and enabling retry operations.
 
 | Column Name | Data Type | Nullable | Default Value | Description |
 | :--- | :--- | :--- | :--- | :--- |
@@ -162,13 +162,14 @@ The `llmtasks` table tracks the status and results of tasks executed by Large La
 | `job_id` | `uuid` | `YES` | | **Foreign Key** referencing `scrapejobs.job_id`. Links the LLM task to the initial scraping job. |
 | `query_id` | `bigint` | `YES` | | **Foreign Key** referencing `queries.query_id`. Links the LLM task to a specific query. |
 | `llm_model_name` | `character varying` | `YES` | | The name of the LLM model used for the task. |
-| `status` | `character varying` | `YES` | | Current status of the LLM task (e.g., 'pending', 'running', 'completed', 'failed'). |
+| `status` | `character varying` | `YES` | | Current status of the LLM task (e.g., 'pending', 'running', 'completed', 'failed', 'retrying'). |
 | `s3_output_path` | `text` | `YES` | | The S3 path where the LLM task's output is stored. |
 | `error_message` | `text` | `YES` | | Detailed message if the LLM task failed. |
 | `created_at` | `timestamp with time zone` | `YES` | `CURRENT_TIMESTAMP` | Timestamp when the LLM task was created. |
 | `completed_at` | `timestamp with time zone` | `YES` | | Timestamp when the LLM task completed. |
 | `product_name` | `text` | `YES` | | The name of the product that the LLM task is associated with. |
 | `product_id` | `bigint` | `YES` | | **Foreign Key** referencing `products.product_id`. Links the LLM task to a specific product. |
+| `session_id` | `uuid` | `YES` | | **NEW:** Session ID to group related tasks for retry operations and bulk management. |
 
 **Table Creation 🛠️**
 
@@ -185,6 +186,7 @@ CREATE TABLE llmtasks (
     completed_at TIMESTAMP WITH TIME ZONE,
     product_name TEXT,
     product_id BIGINT,
+    session_id UUID,
     CONSTRAINT fk_llmtasks_job
         FOREIGN KEY (job_id)
         REFERENCES scrapejobs (job_id)
@@ -220,4 +222,90 @@ CREATE INDEX idx_llmtasks_llm_model_name ON llmtasks (llm_model_name);
 
 -- Index on created_at for chronological sorting and range queries
 CREATE INDEX idx_llmtasks_created_at ON llmtasks (created_at);
+
+-- Index on session_id for efficient session-based filtering and retry operations
+CREATE INDEX idx_llmtasks_session_id ON llmtasks (session_id);
+```
+
+-----
+
+#### 5\. `failed_tasks` Table
+
+**Documentation 📜**
+The `failed_tasks` table stores information about failed LLM tasks for retry operations. It maintains a complete history of task failures with retry tracking, enabling bulk retry operations and failure analysis. This table is essential for the session-based retry mechanism.
+
+| Column Name | Data Type | Nullable | Default Value | Description |
+| :--- | :--- | :--- | :--- | :--- |
+| `id` | `bigint` | `NO` | `nextval('failed_tasks_id_seq')` | **Primary Key.** Auto-incrementing identifier for each failed task record. |
+| `task_id` | `uuid` | `NO` | | **Foreign Key** referencing `llmtasks.task_id`. Links to the original task that failed. |
+| `session_id` | `uuid` | `YES` | | **Foreign Key** referencing `llmtasks.session_id`. Groups failed tasks by session for bulk retry operations. |
+| `job_id` | `uuid` | `YES` | | **Foreign Key** referencing `scrapejobs.job_id`. Links the failed task to the initial scraping job. |
+| `query_id` | `bigint` | `YES` | | **Foreign Key** referencing `queries.query_id`. Links the failed task to a specific query. |
+| `llm_model_name` | `character varying` | `YES` | | The name of the LLM model that was used for the failed task. |
+| `status` | `character varying` | `YES` | | The status of the task when it failed (e.g., 'failed', 'timeout', 'error'). |
+| `s3_output_path` | `text` | `YES` | | The S3 path where the task output was stored (if any). |
+| `error_message` | `text` | `YES` | | Detailed error message explaining why the task failed. |
+| `created_at` | `timestamp with time zone` | `YES` | `CURRENT_TIMESTAMP` | Timestamp when the original task was created. |
+| `completed_at` | `timestamp with time zone` | `YES` | | Timestamp when the task was marked as completed (if applicable). |
+| `product_name` | `text` | `YES` | | The name of the product associated with the failed task. |
+| `product_id` | `bigint` | `YES` | | **Foreign Key** referencing `products.product_id`. Links the failed task to a specific product. |
+| `failed_at` | `timestamp with time zone` | `YES` | `CURRENT_TIMESTAMP` | **NEW:** Timestamp when the task was marked as failed. |
+| `retry_count` | `integer` | `YES` | `0` | **NEW:** Number of times this task has been retried. |
+
+**Table Creation 🛠️**
+
+```sql
+CREATE SEQUENCE IF NOT EXISTS failed_tasks_id_seq;
+
+CREATE TABLE failed_tasks (
+    id BIGINT PRIMARY KEY DEFAULT nextval('failed_tasks_id_seq'),
+    task_id UUID NOT NULL,
+    session_id UUID,
+    job_id UUID,
+    query_id BIGINT,
+    llm_model_name CHARACTER VARYING,
+    status CHARACTER VARYING,
+    s3_output_path TEXT,
+    error_message TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    completed_at TIMESTAMP WITH TIME ZONE,
+    product_name TEXT,
+    product_id BIGINT,
+    failed_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    retry_count INTEGER DEFAULT 0,
+    CONSTRAINT fk_failed_tasks_job
+        FOREIGN KEY (job_id)
+        REFERENCES scrapejobs(job_id)
+        ON DELETE SET NULL,
+    CONSTRAINT fk_failed_tasks_query
+        FOREIGN KEY (query_id)
+        REFERENCES queries(query_id)
+        ON DELETE SET NULL,
+    CONSTRAINT fk_failed_tasks_product
+        FOREIGN KEY (product_id)
+        REFERENCES products(product_id)
+        ON DELETE SET NULL
+);
+```
+
+**Indexing Commands ⚡**
+
+```sql
+-- Index on task_id for efficient lookups of specific failed tasks
+CREATE INDEX idx_failed_tasks_task_id ON failed_tasks (task_id);
+
+-- Index on session_id for efficient session-based filtering and bulk retry operations
+CREATE INDEX idx_failed_tasks_session_id ON failed_tasks (session_id);
+
+-- Index on job_id for efficient foreign key lookups and joins with scrapejobs
+CREATE INDEX idx_failed_tasks_job_id ON failed_tasks (job_id);
+
+-- Index on status for quickly finding failed tasks by their failure status
+CREATE INDEX idx_failed_tasks_status ON failed_tasks (status);
+
+-- Index on failed_at for chronological sorting and failure trend analysis
+CREATE INDEX idx_failed_tasks_failed_at ON failed_tasks (failed_at);
+
+-- Index on retry_count for identifying tasks that have been retried multiple times
+CREATE INDEX idx_failed_tasks_retry_count ON failed_tasks (retry_count);
 ```
