@@ -5,7 +5,7 @@
     "orchestrator": {
       "function_name": "dev-orchestrator",
       "deployment_type": "code",
-      "source_path": "lambdas/llm-orchestrator",
+      "source_path": "lambdas/orchestrator-trigger",
       "handler": "lambda_function.lambda_handler",
       "runtime": "python3.9",
       "timeout": 300,
@@ -254,6 +254,69 @@
       "version": "v20250825-091433-8256999",
       "deployment_type": "container",
       "timestamp": "2025-08-25T09:16:36.913835",
+      "success": true
+    },
+    {
+      "lambda_name": "orchestrator",
+      "version": "v20250826-142615-408ef1d",
+      "deployment_type": "code",
+      "timestamp": "2025-08-26T14:26:30.955086",
+      "success": true
+    },
+    {
+      "lambda_name": "perplexity",
+      "version": "v20250826-142615-408ef1d",
+      "deployment_type": "code",
+      "timestamp": "2025-08-26T14:26:38.210700",
+      "success": true
+    },
+    {
+      "lambda_name": "aio",
+      "version": "v20250826-142615-408ef1d",
+      "deployment_type": "container",
+      "timestamp": "2025-08-26T14:27:33.237157",
+      "success": true
+    },
+    {
+      "lambda_name": "aim",
+      "version": "v20250826-142615-408ef1d",
+      "deployment_type": "container",
+      "timestamp": "2025-08-26T14:28:22.695671",
+      "success": true
+    },
+    {
+      "lambda_name": "chatgpt",
+      "version": "v20250826-142615-408ef1d",
+      "deployment_type": "container",
+      "timestamp": "2025-08-26T14:29:33.892843",
+      "success": true
+    },
+    {
+      "lambda_name": "orchestrator",
+      "version": "v20250826-153318-408ef1d",
+      "deployment_type": "code",
+      "timestamp": "2025-08-26T15:33:26.047577",
+      "success": true
+    },
+    {
+      "lambda_name": "orchestrator",
+      "version": "v20250826-160216-408ef1d",
+      "deployment_type": "code",
+      "timestamp": "2025-08-26T16:02:24.309982",
+      "success": true
+    },
+    {
+      "lambda_name": "orchestrator",
+      "version": "v20250826-160604-408ef1d",
+      "deployment_type": "code",
+      "timestamp": "2025-08-26T16:06:12.804750",
+      "success": true
+    },
+    {
+      "lambda_name": "orchestrator",
+      "version": "v20250826-161456-408ef1d",
+      "deployment_type": "code",
+      "timestamp": "2025-08-26T16:15:04.119135",
       "success": true
     }
   ]

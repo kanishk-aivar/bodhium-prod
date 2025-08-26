@@ -658,7 +658,7 @@ class BodhiumDeployer:
             self.print_error(f"Failed to revert {lambda_name}: {e}")
             return False
     
-    def deploy_all(self, version_tag: str = None) -> bool:
+    def deploy_all(self, version_tag: str = None, no_cache: bool = False) -> bool:
         """Deploy all Lambda functions"""
         if version_tag is None:
             version_tag = self.generate_version_tag()
@@ -677,7 +677,7 @@ class BodhiumDeployer:
             self.print_status(f"Deploying {lambda_name.upper()}")
             self.print_status(f"{'='*60}")
             
-            if self.deploy_lambda(lambda_name, version_tag):
+            if self.deploy_lambda(lambda_name, version_tag, no_cache):
                 success_count += 1
             else:
                 self.print_error(f"Failed to deploy {lambda_name}")
