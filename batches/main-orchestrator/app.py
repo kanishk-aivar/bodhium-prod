@@ -1,16 +1,30 @@
+#!/usr/bin/env python3
+"""
+AWS Batch version of the LLM Orchestrator
+Converts Lambda function to standalone batch processing script
+"""
+
 import os
+import sys
 import boto3
+import botocore
 import logging
 import re
 import json
 import uuid
 import psycopg2
+import argparse
 from datetime import datetime, timezone
 from decimal import Decimal
 
 # Set up structured logging
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
+if not logger.handlers:
+    stream_handler = logging.StreamHandler()
+    formatter = logging.Formatter('[%(asctime)s] %(levelname)s %(message)s')
+    stream_handler.setFormatter(formatter)
+    logger.addHandler(stream_handler)
 
 # Initialize DynamoDB
 dynamodb = boto3.resource('dynamodb')
@@ -32,7 +46,8 @@ MATCH_TABLE = [
 ]
 
 # Configure boto3 Lambda client
-lambda_client = boto3.client("lambda")
+lambda_boto_config = botocore.config.Config(read_timeout=900, connect_timeout=60)
+lambda_client = boto3.client("lambda", config=lambda_boto_config)
 
 def get_db_connection():
     """Get database connection using AWS Secrets Manager"""
@@ -216,83 +231,15 @@ def trigger_lambda(lambda_arn, payload_dict, job_id: str, query_id: int = None):
         })
         return False
 
-def lambda_handler(event, context):
-    logger.info(f"Received event: {json.dumps(event)}")
-    
-    # Extract job_id from event or generate one
-    job_id = None
-    if 'body' in event and event['body']:
-        body = event['body']
-        if isinstance(body, str):
-            body = json.loads(body)
-        job_id = body.get("job_id")
-    else:
-        job_id = event.get("job_id")
-    
-    # Generate job_id if not provided
-    if not job_id:
-        job_id = str(uuid.uuid4())
-        logger.info(f"Generated new job_id: {job_id}")
-    else:
-        logger.info(f"Using provided job_id: {job_id}")
-    
-    orchestration_logger.log_event(job_id, "OrchestrationStarted", {
-        "event": event,
-        "context": {
-            "function_name": context.function_name,
-            "function_version": context.function_version,
-            "invoked_function_arn": context.invoked_function_arn,
-            "memory_limit_in_mb": context.memory_limit_in_mb,
-            "remaining_time_in_millis": context.get_remaining_time_in_millis()
-        }
-    })
-
-    # Parse the JSON body from API Gateway event
-    try:
-        if 'body' in event and event['body']:
-            body = event['body']
-            if isinstance(body, str):
-                body = json.loads(body)
-            
-            # NEW FORMAT: Check for selected_queries
-            selected_queries = body.get("selected_queries")
-            options = body.get("options", {})
-            
-            # BACKWARDS COMPATIBILITY: Support old format
-            if not selected_queries:
-                queries = body.get("queries")
-                if queries:
-                    # Convert old format to new format
-                    selected_queries = [{
-                        "product_id": str(uuid.uuid4()),  # Generate product_id for backwards compatibility
-                        "queries": queries if isinstance(queries, list) else [queries]
-                    }]
-        else:
-            # Fallback for direct Lambda invocation
-            selected_queries = event.get("selected_queries")
-            if not selected_queries:
-                queries = event.get("query") or event.get("queries")
-                if queries:
-                    selected_queries = [{
-                        "product_id": str(uuid.uuid4()),
-                        "queries": queries if isinstance(queries, list) else [queries]
-                    }]
-            options = event.get("options", {})
-    except (json.JSONDecodeError, AttributeError) as e:
-        logger.error(f"Failed to parse request body: {e}")
-        orchestration_logger.log_event(job_id, "OrchestrationFailed", {
-            "error": f"Failed to parse request body: {e}"
-        })
-        return {"error": "Invalid JSON in request body"}
-
+def process_queries_data(selected_queries, options, job_id):
+    """Process queries data and trigger lambdas"""
     if not selected_queries:
-        logger.warning("No selected_queries provided in the event.")
+        logger.warning("No selected_queries provided.")
         orchestration_logger.log_event(job_id, "OrchestrationFailed", {
-            "error": "No selected_queries provided in the event"
+            "error": "No selected_queries provided"
         })
         return {"error": "No selected_queries provided"}
 
-    # Process selected_queries and trigger lambdas
     # Calculate total queries (both existing and new)
     total_queries = 0
     for sq in selected_queries:
@@ -564,24 +511,109 @@ def lambda_handler(event, context):
     
     logger.info(f"Completed processing for job {job_id}. All lambdas triggered.")
     
-    # Return 202 Accepted response
     return {
-        "statusCode": 202,
-        "headers": {
-            "Content-Type": "application/json",
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Headers": "Content-Type",
-            "Access-Control-Allow-Methods": "POST, OPTIONS"
-        },
-        "body": json.dumps({
-            "status": "accepted",
-            "message": "Job submitted successfully. All lambdas have been triggered.",
-            "job_id": job_id,
-            "product_groups_count": len(selected_queries),
-            "total_queries_count": total_queries,
-            "polling_info": {
-                "table_name": os.environ.get('DYNAMODB_TABLE_NAME', 'OrchestrationLogs'),
-                "query_example": f"SELECT * FROM {os.environ.get('DYNAMODB_TABLE_NAME', 'OrchestrationLogs')} WHERE job_id = '{job_id}'"
-            }
-        })
+        "status": "accepted",
+        "message": "Job submitted successfully. All lambdas have been triggered.",
+        "job_id": job_id,
+        "product_groups_count": len(selected_queries),
+        "total_queries_count": total_queries,
+        "polling_info": {
+            "table_name": os.environ.get('ORCHESTRATION_LOGS_TABLE', 'OrchestrationLogs'),
+            "query_example": f"SELECT * FROM {os.environ.get('ORCHESTRATION_LOGS_TABLE', 'OrchestrationLogs')} WHERE job_id = '{job_id}'"
+        }
     }
+
+def main():
+    """Main entry point for AWS Batch job"""
+    parser = argparse.ArgumentParser(description='LLM Orchestrator - AWS Batch Version')
+    parser.add_argument('--input-file', help='JSON file containing selected_queries and options')
+    parser.add_argument('--selected-queries', help='JSON string of selected_queries')
+    parser.add_argument('--options', help='JSON string of options')
+    
+    # Parse known arguments only - ignore unknown arguments from AWS Batch
+    args, unknown = parser.parse_known_args()
+    
+    # Log unknown arguments for debugging
+    if unknown:
+        logger.info(f"Ignoring unknown arguments: {unknown}")
+    
+    try:
+        # Get job_id from environment (passed by trigger Lambda from UI)
+        job_id = os.environ.get('JOB_ID')
+        if not job_id:
+            logger.error("JOB_ID environment variable not provided by trigger Lambda")
+            print(json.dumps({"error": "JOB_ID environment variable not provided"}))
+            sys.exit(1)
+        
+        logger.info(f"Using job_id from UI via trigger Lambda: {job_id}")
+        
+        # Parse input data
+        selected_queries = None
+        options = {}
+        
+        if args.input_file:
+            # Read from JSON file
+            with open(args.input_file, 'r') as f:
+                data = json.load(f)
+                selected_queries = data.get('selected_queries')
+                options = data.get('options', {})
+        elif args.selected_queries:
+            # Parse from command line argument
+            selected_queries = json.loads(args.selected_queries)
+            if args.options:
+                options = json.loads(args.options)
+        else:
+            # Try to read from AWS Batch job parameters via environment variables
+            try:
+                # Check if job parameters are passed via environment variables
+                selected_queries_str = os.environ.get('selected_queries')
+                options_str = os.environ.get('options', '{}')
+                
+                if selected_queries_str:
+                    selected_queries = json.loads(selected_queries_str)
+                    options = json.loads(options_str)
+                    logger.info(f"Read input from environment variables")
+                else:
+                    # Fallback: try to read from stdin (for AWS Batch job parameters)
+                    try:
+                        input_data = json.loads(sys.stdin.read())
+                        selected_queries = input_data.get('selected_queries')
+                        options = input_data.get('options', {})
+                        logger.info(f"Read input from stdin")
+                    except (json.JSONDecodeError, ValueError) as e:
+                        logger.error(f"Failed to parse input from stdin: {e}")
+                        print(json.dumps({"error": f"Invalid input format: {e}"}))
+                        sys.exit(1)
+            except (json.JSONDecodeError, ValueError) as e:
+                logger.error(f"Failed to parse input from environment variables: {e}")
+                print(json.dumps({"error": f"Invalid input format: {e}"}))
+                sys.exit(1)
+        
+        if not selected_queries:
+            logger.error("No selected_queries provided")
+            print(json.dumps({"error": "No selected_queries provided"}))
+            sys.exit(1)
+        
+        # Log environment variables for debugging
+        logger.info(f"Environment variables - JOB_ID: {os.environ.get('JOB_ID')}")
+        logger.info(f"Environment variables - selected_queries: {os.environ.get('selected_queries')}")
+        logger.info(f"Environment variables - options: {os.environ.get('options')}")
+        logger.info(f"Lambda ARNs - ChatGPT: {TARGETS.get('chatgpt')}")
+        logger.info(f"Lambda ARNs - AIO: {TARGETS.get('aio')}")
+        logger.info(f"Lambda ARNs - AIM: {TARGETS.get('aim')}")
+        logger.info(f"Lambda ARNs - Perplexity: {TARGETS.get('perplexity')}")
+        
+        # Process the queries
+        result = process_queries_data(selected_queries, options, job_id)
+        
+        # Output result
+        print(json.dumps(result, indent=2))
+        
+    except Exception as e:
+        logger.error(f"Batch processing failed: {e}")
+        error_result = {"error": str(e), "status": "failed"}
+        print(json.dumps(error_result, indent=2))
+        sys.exit(1)
+
+if __name__ == "__main__":
+    main()
