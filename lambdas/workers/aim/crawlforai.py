@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import argparse
 import sys
 import tempfile
+from typing import List
 import uuid
 import shutil
 import atexit
@@ -1461,6 +1462,31 @@ def get_product_name_from_db(product_id):
         logger.error(f"Error fetching product name for product_id {product_id}: {e}")
         return 'Unknown Product'
 
+def get_brand_name_from_db(job_id):
+    """Fetch brand name from scrapejobs table using job_id"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT brand_name FROM scrapejobs WHERE job_id = %s",
+            (job_id,)
+        )
+        result = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        
+        if result and result[0]:
+            brand_name = result[0]
+            logger.info(f"Found brand name: {brand_name} for job_id: {job_id}")
+            return brand_name
+        else:
+            logger.warning(f"Brand name not found for job_id: {job_id}")
+            return 'Unknown Brand'
+            
+    except Exception as e:
+        logger.error(f"Error fetching brand name for job_id {job_id}: {e}")
+        return 'Unknown Brand'
+
 def create_llm_task(job_id, query_id, llm_model_name="ai-mode", product_id=None, product_name=None, session_id=None, task_id=None):
     logger.info(f"Creating LLM task for job_id: {job_id}, query_id: {query_id}, session_id: {session_id}")
     
@@ -1643,6 +1669,47 @@ def log_orchestration_event(job_id, event_name, details=None):
     except Exception as e:
         logger.error(f"Error logging orchestration event: {e}")
 
+# -------- Lambda Invocation --------
+
+def invoke_citation_scraper_lambda(citations: List[str], job_id: str, query_id: str, product_id: str, user_query: str, task_id: str) -> bool:
+    """Invoke the citation-scraper lambda with the extracted citations"""
+    try:
+        if not citations:
+            logger.info("No citations to scrape, skipping citation-scraper invocation")
+            return True
+            
+        lambda_client = boto3.client('lambda')
+        
+        # Prepare payload for citation-scraper lambda with full context
+        payload = {
+            'urls': citations,
+            'job_id': job_id,
+            'product_id': product_id,
+            'mode': 'aim',  # Use specific mode for AI Mode
+            'query': user_query[:100] if user_query else 'na',  # Truncate query if too long
+            'brand_name': get_brand_name_from_db(job_id),  # Pass brand name directly
+            'product_name': get_product_name_from_db(product_id) if product_id else 'Unknown Product'  # Pass product name directly
+        }
+        
+        # Get the citation-scraper lambda function name from environment or use default
+        citation_lambda_name = os.environ.get('CITATION_SCRAPER_LAMBDA_NAME', 'citation-scraper')
+        
+        logger.info(f"Invoking citation-scraper lambda: {citation_lambda_name} with {len(citations)} URLs")
+        logger.info(f"Payload: {json.dumps(payload, ensure_ascii=False)}")
+        
+        response = lambda_client.invoke(
+            FunctionName=citation_lambda_name,
+            InvocationType='Event',  # Asynchronous invocation
+            Payload=json.dumps(payload)
+        )
+        
+        logger.info(f"Successfully invoked citation-scraper lambda. Response: {response}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to invoke citation-scraper lambda: {str(e)}")
+        return False
+
 def upload_to_s3(content, bucket_name, s3_key, content_type='text/plain'):
     """Generic S3 upload function (old format)"""
     try:
@@ -1670,13 +1737,30 @@ def upload_to_s3(content, bucket_name, s3_key, content_type='text/plain'):
         return None
 
 def upload_to_new_bucket_structure(content, job_id, product_id, query_id, content_type='application/json', file_extension='json'):
-    """Upload content to new bucket structure: job_id/product_id/aim_query_{query_id}.json"""
+    """Upload content to new bucket structure: brand_name/job_id/product_name/query_text/mode/response.md/json"""
     try:
         new_bucket = 'bodhium-temp'
         s3_client = boto3.client('s3')
         
-        # Create new S3 key following the required structure with query_id
-        s3_key = f"{job_id}/{product_id}/aim_query_{query_id}.{file_extension}"
+        # Get brand name and product name from database
+        brand_name = get_brand_name_from_db(job_id)
+        product_name = get_product_name_from_db(product_id) if product_id else 'Unknown Product'
+        
+        # Get query text from the content or use a default
+        query_text = "unknown_query"
+        if isinstance(content, dict) and 'query' in content:
+            query_text = content['query']
+        elif isinstance(content, str) and len(content) > 0:
+            # Extract first few words as query text
+            query_text = content.split('\n')[0][:50] if '\n' in content else content[:50]
+        
+        # Sanitize names for S3 path (replace spaces with underscores, remove special chars)
+        brand_name_safe = re.sub(r'[^a-zA-Z0-9\s]', '', brand_name).replace(' ', '_').strip()
+        product_name_safe = re.sub(r'[^a-zA-Z0-9\s]', '', product_name).replace(' ', '_').strip()
+        query_text_safe = re.sub(r'[^a-zA-Z0-9\s]', '', query_text).replace(' ', '_').strip()
+        
+        # Create new S3 key following the required structure: brand_name/job_id/product_name/query_text/mode/response.md/json
+        s3_key = f"{brand_name_safe}/{job_id}/{product_name_safe}/{query_text_safe}/aim/response.{file_extension}"
         
         if isinstance(content, str):
             body = content
@@ -1939,6 +2023,93 @@ def lambda_handler(event, context):
                     update_task_status(task_id, "failed", error_message=error_msg)
             except Exception as db_error:
                 print(f"⚠️ Failed to update task status: {db_error}")
+        
+        # Log completion event
+        try:
+            log_orchestration_event(job_id, "task_completed", {
+                "query": query,
+                "task_id": task_id,
+                "product_id": product_id,
+                "success": result.get('success', False) if result else False,
+                "pipeline": "google_ai_mode_extraction",
+                "timestamp": datetime.now().isoformat()
+            })
+        except Exception as log_error:
+            print(f"⚠️ Failed to log completion event: {log_error}")
+        
+        # Trigger citation-scraper lambda with extracted citations
+        if result and result.get('success') and result.get('metadata', {}).get('external_sources_found', 0) > 0:
+            try:
+                # Extract citations from the result metadata
+                external_sources = result.get('metadata', {}).get('external_sources_found', 0)
+                if external_sources > 0:
+                    # For AI Mode, we need to extract URLs from the links file if available
+                    citations = []
+                    links_file = result.get('files', {}).get('links')
+                    if links_file and os.path.exists(links_file):
+                        try:
+                            with open(links_file, 'r', encoding='utf-8') as f:
+                                links_data = json.load(f)
+                                for link in links_data:
+                                    url = link.get('url', '')
+                                    if url:
+                                        # Ensure URL has proper protocol
+                                        if url.startswith('//'):
+                                            url = 'https:' + url
+                                        elif url.startswith('/'):
+                                            # Skip relative URLs as they're not useful for citation scraping
+                                            continue
+                                        elif not url.startswith(('http://', 'https://')):
+                                            # Skip URLs without protocol
+                                            continue
+                                        
+                                        # Validate URL format
+                                        if url.startswith(('http://', 'https://')) and len(url) > 10:
+                                            citations.append(url)
+                                        
+                        except Exception as link_error:
+                            print(f"⚠️ Error reading links file: {link_error}")
+                    
+                    if citations:
+                        # Remove duplicates while preserving order
+                        unique_citations = []
+                        seen_urls = set()
+                        for url in citations:
+                            if url not in seen_urls:
+                                unique_citations.append(url)
+                                seen_urls.add(url)
+                        
+                        citation_invocation_success = invoke_citation_scraper_lambda(
+                            unique_citations, job_id, query_id, product_id, query, task_id
+                        )
+                        if citation_invocation_success:
+                            logger.info(f"Successfully triggered citation-scraper lambda with {len(unique_citations)} citations")
+                            print(f"🔗 Citation-scraper lambda triggered with {len(unique_citations)} URLs")
+                            
+                            # Log citation-scraper trigger event
+                            try:
+                                log_orchestration_event(job_id, "citation_scraper_triggered", {
+                                    "task_id": task_id,
+                                    "product_id": product_id,
+                                    "citations_count": len(unique_citations),
+                                    "citations": unique_citations[:5],  # Log first 5 citations for reference
+                                    "pipeline": "google_ai_mode_extraction",
+                                    "timestamp": datetime.now().isoformat()
+                                })
+                            except Exception as log_error:
+                                print(f"⚠️ Failed to log citation-scraper trigger event: {log_error}")
+                        else:
+                            logger.warning("Failed to trigger citation-scraper lambda")
+                            print(f"⚠️ Failed to trigger citation-scraper lambda")
+                    else:
+                        logger.info("No valid citations found, skipping citation-scraper invocation")
+                        print(f"ℹ️ No valid citations found, skipping citation-scraper invocation")
+                else:
+                    logger.info("No external sources found, skipping citation-scraper invocation")
+                    print(f"ℹ️ No external sources found, skipping citation-scraper invocation")
+            except Exception as citation_error:
+                logger.error(f"Error triggering citation-scraper lambda: {citation_error}")
+                print(f"❌ Error triggering citation-scraper lambda: {citation_error}")
         
         if result and result.get('success'):
             return {

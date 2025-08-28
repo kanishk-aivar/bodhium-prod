@@ -1,0 +1,31 @@
+# Exact versions matching crawl4ai 0.7.2 and your working setup
+
+# Core crawler
+crawl4ai==0.7.2
+playwright==1.53.0
+
+# Lambda runtime + AWS SDK
+awslambdaric==2.2.0
+boto3==1.39.16
+botocore>=1.32.0
+
+# Async and HTTP essentials
+aiofiles==24.1.0
+aiohttp>=3.9.0
+requests>=2.31.0
+httpx>=0.25.0
+anyio>=4.0.0
+urllib3>=2.0.0
+
+# Data handling
+pydantic==2.11.7
+typing-extensions>=4.12.2
+orjson>=3.9.0
+python-dateutil>=2.8.0
+
+# System monitoring
+psutil>=5.9.0
+
+# Content processing
+beautifulsoup4>=4.12.0
+markdownify>=0.11.6
