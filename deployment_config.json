@@ -43,6 +43,23 @@
       "ecr_repo": "dev-chatgpt",
       "timeout": 900,
       "memory_size": 3008
+    },
+    "citation-scraper": {
+      "function_name": "BodhiumSources",
+      "deployment_type": "container",
+      "source_path": "lambdas/citation-scraper",
+      "ecr_repo": "bodhium-sources",
+      "timeout": 900,
+      "memory_size": 3008
+    },
+    "adhoc-results": {
+      "function_name": "bodhium-results-poll",
+      "deployment_type": "code",
+      "source_path": "lambdas/adhoc-results",
+      "handler": "lambda_function.lambda_handler",
+      "runtime": "python3.9",
+      "timeout": 300,
+      "memory_size": 512
     }
   },
   "deployment_history": [
@@ -317,6 +334,251 @@
       "version": "v20250826-161456-408ef1d",
       "deployment_type": "code",
       "timestamp": "2025-08-26T16:15:04.119135",
+      "success": true
+    },
+    {
+      "lambda_name": "aim",
+      "version": "v20250826-215850-c93bf18",
+      "deployment_type": "container",
+      "timestamp": "2025-08-26T22:00:13.247352",
+      "success": true
+    },
+    {
+      "lambda_name": "aim",
+      "version": "v20250828-094137-3e92edb",
+      "deployment_type": "container",
+      "timestamp": "2025-08-28T09:42:31.840334",
+      "success": true
+    },
+    {
+      "lambda_name": "perplexity",
+      "version": "v20250828-110346-3e92edb",
+      "deployment_type": "code",
+      "timestamp": "2025-08-28T11:03:54.485676",
+      "success": true
+    },
+    {
+      "lambda_name": "orchestrator",
+      "version": "v20250828-113319-3e92edb",
+      "deployment_type": "code",
+      "timestamp": "2025-08-28T11:33:31.280758",
+      "success": true
+    },
+    {
+      "lambda_name": "perplexity",
+      "version": "v20250828-113319-3e92edb",
+      "deployment_type": "code",
+      "timestamp": "2025-08-28T11:33:38.508788",
+      "success": true
+    },
+    {
+      "lambda_name": "aio",
+      "version": "v20250828-113319-3e92edb",
+      "deployment_type": "container",
+      "timestamp": "2025-08-28T11:34:33.052047",
+      "success": true
+    },
+    {
+      "lambda_name": "aim",
+      "version": "v20250828-113319-3e92edb",
+      "deployment_type": "container",
+      "timestamp": "2025-08-28T11:35:22.252899",
+      "success": true
+    },
+    {
+      "lambda_name": "chatgpt",
+      "version": "v20250828-113319-3e92edb",
+      "deployment_type": "container",
+      "timestamp": "2025-08-28T11:36:33.159162",
+      "success": true
+    },
+    {
+      "lambda_name": "citation-scraper",
+      "version": "v20250828-113832-3e92edb",
+      "deployment_type": "container",
+      "timestamp": "2025-08-28T11:43:19.562580",
+      "success": true
+    },
+    {
+      "lambda_name": "orchestrator",
+      "version": "v20250828-114839-3e92edb",
+      "deployment_type": "code",
+      "timestamp": "2025-08-28T11:48:51.696504",
+      "success": true
+    },
+    {
+      "lambda_name": "perplexity",
+      "version": "v20250828-114839-3e92edb",
+      "deployment_type": "code",
+      "timestamp": "2025-08-28T11:48:59.025403",
+      "success": true
+    },
+    {
+      "lambda_name": "aio",
+      "version": "v20250828-114839-3e92edb",
+      "deployment_type": "container",
+      "timestamp": "2025-08-28T11:50:15.137119",
+      "success": true
+    },
+    {
+      "lambda_name": "aim",
+      "version": "v20250828-114839-3e92edb",
+      "deployment_type": "container",
+      "timestamp": "2025-08-28T11:51:11.233438",
+      "success": true
+    },
+    {
+      "lambda_name": "chatgpt",
+      "version": "v20250828-114839-3e92edb",
+      "deployment_type": "container",
+      "timestamp": "2025-08-28T11:52:00.718158",
+      "success": true
+    },
+    {
+      "lambda_name": "citation-scraper",
+      "version": "v20250828-114839-3e92edb",
+      "deployment_type": "container",
+      "timestamp": "2025-08-28T11:52:50.368119",
+      "success": true
+    },
+    {
+      "lambda_name": "perplexity",
+      "version": "v20250828-120326-3e92edb",
+      "deployment_type": "code",
+      "timestamp": "2025-08-28T12:03:34.811516",
+      "success": true
+    },
+    {
+      "lambda_name": "citation-scraper",
+      "version": "v20250828-120401-3e92edb",
+      "deployment_type": "container",
+      "timestamp": "2025-08-28T12:04:57.237485",
+      "success": true
+    },
+    {
+      "lambda_name": "citation-scraper",
+      "version": "v20250828-121345-3e92edb",
+      "deployment_type": "container",
+      "timestamp": "2025-08-28T12:14:42.044420",
+      "success": true
+    },
+    {
+      "lambda_name": "orchestrator",
+      "version": "v20250828-122948-3e92edb",
+      "deployment_type": "code",
+      "timestamp": "2025-08-28T12:30:00.436383",
+      "success": true
+    },
+    {
+      "lambda_name": "perplexity",
+      "version": "v20250828-122948-3e92edb",
+      "deployment_type": "code",
+      "timestamp": "2025-08-28T12:30:07.700975",
+      "success": true
+    },
+    {
+      "lambda_name": "aio",
+      "version": "v20250828-122948-3e92edb",
+      "deployment_type": "container",
+      "timestamp": "2025-08-28T12:30:56.827577",
+      "success": true
+    },
+    {
+      "lambda_name": "aim",
+      "version": "v20250828-122948-3e92edb",
+      "deployment_type": "container",
+      "timestamp": "2025-08-28T12:31:46.784714",
+      "success": true
+    },
+    {
+      "lambda_name": "chatgpt",
+      "version": "v20250828-122948-3e92edb",
+      "deployment_type": "container",
+      "timestamp": "2025-08-28T12:32:47.133158",
+      "success": true
+    },
+    {
+      "lambda_name": "citation-scraper",
+      "version": "v20250828-122948-3e92edb",
+      "deployment_type": "container",
+      "timestamp": "2025-08-28T12:33:59.907043",
+      "success": true
+    },
+    {
+      "lambda_name": "citation-scraper",
+      "version": "v20250828-125258-3e92edb",
+      "deployment_type": "container",
+      "timestamp": "2025-08-28T12:53:49.495323",
+      "success": true
+    },
+    {
+      "lambda_name": "perplexity",
+      "version": "v20250828-125448-3e92edb",
+      "deployment_type": "code",
+      "timestamp": "2025-08-28T12:54:56.955588",
+      "success": true
+    },
+    {
+      "lambda_name": "aio",
+      "version": "v20250828-125502-3e92edb",
+      "deployment_type": "container",
+      "timestamp": "2025-08-28T12:55:58.789573",
+      "success": true
+    },
+    {
+      "lambda_name": "aim",
+      "version": "v20250828-125607-3e92edb",
+      "deployment_type": "container",
+      "timestamp": "2025-08-28T12:56:58.370652",
+      "success": true
+    },
+    {
+      "lambda_name": "chatgpt",
+      "version": "v20250828-125709-3e92edb",
+      "deployment_type": "container",
+      "timestamp": "2025-08-28T12:58:22.582369",
+      "success": true
+    },
+    {
+      "lambda_name": "citation-scraper",
+      "version": "v20250828-130003-3e92edb",
+      "deployment_type": "container",
+      "timestamp": "2025-08-28T13:00:54.756875",
+      "success": true
+    },
+    {
+      "lambda_name": "adhoc-results",
+      "version": "v20250828-143028-e4fbbbd",
+      "deployment_type": "code",
+      "timestamp": "2025-08-28T14:30:44.853091",
+      "success": true
+    },
+    {
+      "lambda_name": "adhoc-results",
+      "version": "v20250828-143214-e4fbbbd",
+      "deployment_type": "code",
+      "timestamp": "2025-08-28T14:32:33.768028",
+      "success": true
+    },
+    {
+      "lambda_name": "adhoc-results",
+      "version": "v20250828-143603-e4fbbbd",
+      "deployment_type": "code",
+      "timestamp": "2025-08-28T14:36:23.865958",
+      "success": true
+    },
+    {
+      "lambda_name": "adhoc-results",
+      "version": "v20250828-143931-e4fbbbd",
+      "deployment_type": "code",
+      "timestamp": "2025-08-28T14:39:50.729861",
+      "success": true
+    },
+    {
+      "lambda_name": "adhoc-results",
+      "version": "v20250828-144050-e4fbbbd",
+      "deployment_type": "code",
+      "timestamp": "2025-08-28T14:41:09.779394",
       "success": true
     }
   ]

@@ -735,7 +735,8 @@ Lambda Functions:
   aio           - AI Overview worker (container deployment)
   aim           - AI Mode worker (container deployment)
   chatgpt       - ChatGPT worker (container deployment)
-
+  citation-scraper - Citation scraper worker (container deployment)
+  adhoc-results   - Adhoc results poll (code deployment)
 Configuration:
   Requires deployment_config.json file. Use 'init-config' to create template.
         """
@@ -747,8 +748,8 @@ Configuration:
     
     parser.add_argument('--lambda', '-l', 
                        metavar='NAME',
-                       choices=['orchestrator', 'perplexity', 'aio', 'aim', 'chatgpt'],
-                       help='Lambda function name (orchestrator, perplexity, aio, aim, chatgpt)')
+                       choices=['orchestrator', 'perplexity', 'aio', 'aim', 'chatgpt', 'citation-scraper', 'adhoc-results'],
+                       help='Lambda function name (orchestrator, perplexity, aio, aim, chatgpt, citation-scraper, adhoc-results)')
     
     parser.add_argument('--version', '-v', 
                        metavar='TAG',
@@ -761,7 +762,7 @@ Configuration:
     parser.add_argument('--multiple', '-m', 
                        nargs='+', 
                        metavar='NAME',
-                       choices=['orchestrator', 'perplexity', 'aio', 'aim', 'chatgpt'],
+                       choices=['orchestrator', 'perplexity', 'aio', 'aim', 'chatgpt', 'citation-scraper', 'adhoc-results'],
                        help='Multiple lambda names for batch operations')
     
     parser.add_argument('--no-cache', 
