@@ -1,11 +1,19 @@
 import os
+import sys
 import boto3
 import json
 import logging
 import psycopg2
 import csv
+import re
+
+import numpy
+import pytz
+import pandas as pd
 from io import StringIO
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import threading
 
 # Setup logging
 logger = logging.getLogger()
@@ -20,6 +28,9 @@ CSV_OUTPUT_PATH = os.environ.get('CSV_OUTPUT_PATH', 'csv-job-results/')
 # AWS clients
 secrets_client = boto3.client('secretsmanager', region_name=REGION_NAME)
 s3_client = boto3.client('s3', region_name=REGION_NAME)
+
+# Thread lock for DataFrame updates
+df_lock = threading.Lock()
 
 def get_rds_connection():
     """Get RDS connection from secrets manager"""
@@ -45,7 +56,6 @@ def check_job_completion_status(job_id):
     conn = get_rds_connection()
     try:
         with conn.cursor() as cur:
-            # Check completion status
             query = """
             SELECT 
                 COUNT(*) as total_tasks,
@@ -61,12 +71,11 @@ def check_job_completion_status(job_id):
             cur.execute(query, (job_id,))
             result = cur.fetchone()
             
-            if result and result[0] > 0:  # total_tasks > 0
+            if result and result[0] > 0:
                 total, finished, completed, failed, processing, pending = result
                 is_complete = total == finished
                 
-                logger.info(f"Job {job_id} Status: {finished}/{total} finished "
-                          f"({completed} completed, {failed} failed, {processing} processing, {pending} pending)")
+                logger.info(f"Job {job_id} Status: {finished}/{total} finished")
                 
                 return {
                     'job_exists': True,
@@ -80,8 +89,6 @@ def check_job_completion_status(job_id):
                     'completion_percentage': round((finished / total) * 100, 2) if total > 0 else 0
                 }
             else:
-                # Job doesn't exist or has no tasks
-                logger.warning(f"Job {job_id} not found or has no tasks")
                 return {
                     'job_exists': False,
                     'error': f'Job {job_id} not found or has no associated tasks'
@@ -156,7 +163,6 @@ def convert_to_csv(data, column_names):
                 elif isinstance(item, (int, float)):
                     csv_row.append(str(item))
                 else:
-                    # Handle strings with potential commas/quotes
                     csv_row.append(str(item).replace('\n', ' ').replace('\r', ''))
             writer.writerow(csv_row)
         
@@ -201,8 +207,243 @@ def save_csv_to_s3(csv_content, job_id):
         logger.error(f"Failed to save CSV to S3: {str(e)}")
         return None, None
 
+def check_soft_failure(content):
+    """Check if the response contains a soft failure"""
+    if isinstance(content, str):
+        return "Crawl4AI Error" in content or "Error Message" in content
+    elif isinstance(content, dict):
+        content_str = content.get('content', '')
+        return "Crawl4AI Error" in content_str or "Error Message" in content_str
+    return False
+
+def check_ai_overview_presence(content):
+    """Check if AI Overview is present in the response"""
+    if isinstance(content, str):
+        if "# AI Overview" in content or "**AI Overview**" in content:
+            if "An AI Overview is not available" in content and not re.search(r'\*\*AI Overview\*\*\s+\w+', content):
+                return False
+            return bool(re.search(r'(\*\*AI Overview\*\*\s+\w+)|(\# AI Overview\s+\w+)', content))
+        return False
+    elif isinstance(content, dict):
+        content_str = content.get('content', '')
+        if "# AI Overview" in content_str or "**AI Overview**" in content_str:
+            if "An AI Overview is not available" in content_str and not re.search(r'\*\*AI Overview\*\*\s+\w+', content_str):
+                return False
+            return bool(re.search(r'(\*\*AI Overview\*\*\s+\w+)|(\# AI Overview\s+\w+)', content_str))
+        return False
+    return False
+
+def extract_citations(content):
+    """Extract citations from the content"""
+    citations = []
+    
+    if isinstance(content, str):
+        try:
+            content_json = json.loads(content)
+            if 'citations' in content_json:
+                return content_json['citations']
+        except:
+            pass
+        
+        numbered_citations = re.findall(r'$$\d+$$(?:$$[^$$]+$$)?', content)
+        if numbered_citations:
+            citations.extend(numbered_citations)
+        
+        url_citations = re.findall(r'$$([^$$]+)$$$([^)]+)$', content)
+        if url_citations:
+            citations.extend([url for _, url in url_citations])
+            
+    elif isinstance(content, dict):
+        if 'citations' in content:
+            return content['citations']
+        
+        content_str = content.get('content', '')
+        numbered_citations = re.findall(r'$$\d+$$(?:$$[^$$]+$$)?', content_str)
+        if numbered_citations:
+            citations.extend(numbered_citations)
+        
+        url_citations = re.findall(r'$$([^$$]+)$$$([^)]+)$', content_str)
+        if url_citations:
+            citations.extend([url for _, url in url_citations])
+    
+    return citations
+
+def extract_model_specific_content(content, model_name, file_extension):
+    """Extract model-specific content based on the model name and file type"""
+    if file_extension == '.json':
+        if isinstance(content, dict):
+            if model_name in ['GOOGLE_AI_MODE', 'GOOGLE_AI_OVERVIEW', 'perplexity']:
+                return content.get('content', '')
+        elif isinstance(content, str):
+            try:
+                json_content = json.loads(content)
+                if model_name in ['GOOGLE_AI_MODE', 'GOOGLE_AI_OVERVIEW', 'perplexity']:
+                    return json_content.get('content', '')
+            except:
+                pass
+    
+    elif file_extension == '.md' and model_name == 'ChatGPT':
+        # For ChatGPT markdown files, extract only the Response Content section
+        if isinstance(content, str):
+            # Find the "## Response Content" section
+            # response_content_match = re.search(r'## Response Content\s*\n\n(.*?)(?=\n---|\n###|\Z)', content, re.DOTALL)
+            # if response_content_match:
+            #     return response_content_match.group(1).strip()
+            pass
+    # Fallback: return original content if no specific extraction rule applies
+    return content
+
+def process_row(index, row, df):
+    """Process a single row from the CSV file"""
+    result_data = {
+        'result': None,
+        'soft_failure': False,
+        'presence': False,
+        'citations': None
+    }
+    
+    if row['status'] == 'completed' and pd.notna(row['s3_output_path']):
+        try:
+            # Parse the S3 path
+            s3_path = row['s3_output_path']
+            bucket_name = s3_path.split('/')[2]
+            key = '/'.join(s3_path.split('/')[3:])
+            
+            # Get the file content from S3
+            response = s3_client.get_object(Bucket=bucket_name, Key=key)
+            content = response['Body'].read().decode('utf-8')
+            
+            # Handle different file types
+            file_extension = '.' + s3_path.split('.')[-1]
+            
+            if s3_path.endswith('.json'):
+                # Parse JSON content
+                json_content = json.loads(content)
+                
+                # Extract model-specific content
+                extracted_content = extract_model_specific_content(json_content, row['llm_model_name'], file_extension)
+                result_data['result'] = extracted_content
+                
+                # Check for soft failure
+                result_data['soft_failure'] = check_soft_failure(json_content)
+                
+                # Check for AI Overview presence if it's GOOGLE_AI_OVERVIEW
+                if row['llm_model_name'] == 'GOOGLE_AI_OVERVIEW':
+                    result_data['presence'] = check_ai_overview_presence(json_content)
+                
+                # Extract citations
+                citations = extract_citations(json_content)
+                if citations:
+                    result_data['citations'] = citations
+                
+            elif s3_path.endswith('.md'):
+                # Extract model-specific content for markdown
+                extracted_content = extract_model_specific_content(content, row['llm_model_name'], file_extension)
+                result_data['result'] = extracted_content
+                
+                # Check for soft failure
+                result_data['soft_failure'] = check_soft_failure(content)
+                
+                # Check for AI Overview presence if it's GOOGLE_AI_OVERVIEW
+                if row['llm_model_name'] == 'GOOGLE_AI_OVERVIEW':
+                    result_data['presence'] = check_ai_overview_presence(content)
+                
+                # Extract citations
+                citations = extract_citations(content)
+                if citations:
+                    result_data['citations'] = citations
+                
+            else:
+                # For other file types, extract model-specific content
+                extracted_content = extract_model_specific_content(content, row['llm_model_name'], file_extension)
+                result_data['result'] = extracted_content
+                
+                # Check for soft failure
+                result_data['soft_failure'] = check_soft_failure(content)
+                
+                # Check for AI Overview presence if it's GOOGLE_AI_OVERVIEW
+                if row['llm_model_name'] == 'GOOGLE_AI_OVERVIEW':
+                    result_data['presence'] = check_ai_overview_presence(content)
+                
+                # Extract citations
+                citations = extract_citations(content)
+                if citations:
+                    result_data['citations'] = citations
+            
+            logger.info(f"Processed row {index}: {s3_path}")
+            
+        except Exception as e:
+            logger.error(f"Error processing row {index}: {str(e)}")
+            result_data['result'] = f"Error: {str(e)}"
+    else:
+        result_data['result'] = "No output path or task not completed"
+    
+    return index, result_data
+
+def analyze_content_from_csv(csv_content, max_workers=5):
+    """Analyze content from CSV string and return enhanced CSV with analysis"""
+    try:
+        # Convert CSV string to DataFrame
+        df = pd.read_csv(StringIO(csv_content))
+        
+        # Add new columns for analysis
+        df['result'] = None
+        df['soft_failure'] = False
+        df['presence'] = False
+        df['citations'] = None
+        
+        logger.info(f"Processing {len(df)} rows with {max_workers} workers...")
+        
+        # Use ThreadPoolExecutor for parallel processing
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all rows for processing
+            future_to_index = {
+                executor.submit(process_row, index, row, df): index 
+                for index, row in df.iterrows()
+            }
+            
+            # Process completed futures
+            for future in as_completed(future_to_index):
+                index = future_to_index[future]
+                try:
+                    row_index, result_data = future.result()
+                    
+                    # Thread-safe DataFrame update
+                    with df_lock:
+                        df.at[row_index, 'result'] = result_data['result']
+                        df.at[row_index, 'soft_failure'] = result_data['soft_failure']
+                        df.at[row_index, 'presence'] = result_data['presence']
+                        df.at[row_index, 'citations'] = result_data['citations']
+                        
+                except Exception as e:
+                    logger.error(f"Error in future for row {index}: {str(e)}")
+                    with df_lock:
+                        df.at[index, 'result'] = f"Future error: {str(e)}"
+        
+        # Convert result and citations columns to string for JSON objects
+        for index, row in df.iterrows():
+            # Result should now mostly be strings due to content extraction,
+            # but handle any remaining dict objects
+            if isinstance(row['result'], dict):
+                df.at[index, 'result'] = json.dumps(row['result'])
+            
+            if isinstance(row['citations'], list):
+                df.at[index, 'citations'] = json.dumps(row['citations'])
+        
+        # Convert back to CSV string
+        output = StringIO()
+        df.to_csv(output, index=False)
+        enhanced_csv = output.getvalue()
+        
+        logger.info(f"Content analysis completed. Enhanced CSV with {len(df)} rows")
+        return enhanced_csv, df
+        
+    except Exception as e:
+        logger.error(f"Content analysis failed: {str(e)}")
+        raise Exception(f"Content analysis failed: {str(e)}")
+
 def lambda_handler(event, context):
-    """Main Lambda Handler for Job Results Processing"""
+    """Main Lambda Handler for Job Results Processing with Content Analysis"""
     try:
         logger.info(f"Lambda invoked with event: {json.dumps(event, default=str)}")
         
@@ -270,34 +511,8 @@ def lambda_handler(event, context):
                 })
             }
         
-        # Step 2: Handle incomplete jobs
-        # if not job_status['is_complete']:
-        #     logger.info(f"Job {job_id} is still processing")
-        #     return {
-        #         'statusCode': 202,  # Accepted - still processing
-        #         'headers': {
-        #             'Content-Type': 'application/json',
-        #             'Access-Control-Allow-Origin': '*'
-        #         },
-        #         'body': json.dumps({
-        #             'status': 'processing',
-        #             'job_id': job_id,
-        #             'progress': {
-        #                 'total_tasks': job_status['total_tasks'],
-        #                 'finished_tasks': job_status['finished_tasks'],
-        #                 'completed_tasks': job_status['completed_tasks'],
-        #                 'failed_tasks': job_status['failed_tasks'],
-        #                 'processing_tasks': job_status['processing_tasks'],
-        #                 'pending_tasks': job_status['pending_tasks'],
-        #                 'completion_percentage': job_status['completion_percentage']
-        #             },
-        #             'message': 'Job still in progress. Poll this endpoint to check status.',
-        #             'estimated_completion': 'Please check again in a few minutes'
-        #         })
-        #     }
-        
-        # Step 3: Fetch completed job results
-        logger.info(f"Step 3: Fetching results for completed job {job_id}")
+        # Step 2: Fetch completed job results
+        logger.info(f"Step 2: Fetching results for completed job {job_id}")
         try:
             results, column_names = fetch_job_results(job_id)
         except Exception as e:
@@ -331,8 +546,8 @@ def lambda_handler(event, context):
                 })
             }
         
-        # Step 4: Convert to CSV
-        logger.info(f"Step 4: Converting {len(results)} records to CSV")
+        # Step 3: Convert to CSV
+        logger.info(f"Step 3: Converting {len(results)} records to CSV")
         try:
             csv_content = convert_to_csv(results, column_names)
         except Exception as e:
@@ -350,12 +565,31 @@ def lambda_handler(event, context):
                 })
             }
         
-        # Step 5: Save CSV to S3
-        logger.info(f"Step 5: Saving CSV to S3 for job {job_id}")
-        s3_url, filename = save_csv_to_s3(csv_content, job_id)
+        # Step 4: Analyze content from CSV
+        logger.info(f"Step 4: Analyzing content for {len(results)} records")
+        try:
+            enhanced_csv, df = analyze_content_from_csv(csv_content, max_workers=5)
+        except Exception as e:
+            logger.error(f"Content analysis failed: {str(e)}")
+            return {
+                'statusCode': 500,
+                'headers': {
+                    'Content-Type': 'application/json',
+                    'Access-Control-Allow-Origin': '*'
+                },
+                'body': json.dumps({
+                    'error': 'Content analysis failed',
+                    'job_id': job_id,
+                    'message': str(e)
+                })
+            }
+        
+        # Step 5: Save enhanced CSV to S3
+        logger.info(f"Step 5: Saving enhanced CSV to S3 for job {job_id}")
+        s3_url, filename = save_csv_to_s3(enhanced_csv, job_id)
         
         if not s3_url:
-            logger.error("Failed to save CSV to S3")
+            logger.error("Failed to save enhanced CSV to S3")
             return {
                 'statusCode': 500,
                 'headers': {
@@ -365,11 +599,20 @@ def lambda_handler(event, context):
                 'body': json.dumps({
                     'error': 'S3 upload failed',
                     'job_id': job_id,
-                    'message': 'CSV generated but could not be saved to S3'
+                    'message': 'Enhanced CSV generated but could not be saved to S3'
                 })
             }
         
-        # Step 6: Return success response
+        # Step 6: Calculate analysis summary
+        analysis_summary = {
+            'total_records': len(df),
+            'records_with_content': len(df[df['result'].notna() & (df['result'] != "No output path or task not completed")]),
+            'soft_failures': len(df[df['soft_failure'] == True]),
+            'ai_overview_present': len(df[df['presence'] == True]),
+            'records_with_citations': len(df[df['citations'].notna()])
+        }
+        
+        # Step 7: Return success response
         success_response = {
             'status': 'completed',
             'job_id': job_id,
@@ -380,17 +623,19 @@ def lambda_handler(event, context):
                 'total_tasks': job_status['total_tasks'],
                 'success_rate': round((job_status['completed_tasks'] / job_status['total_tasks']) * 100, 2)
             },
+            'content_analysis': analysis_summary,
             'csv_details': {
                 'generated': True,
                 's3_location': s3_url,
                 'filename': filename,
-                'size_info': f"{len(results)} rows, {len(column_names)} columns"
+                'size_info': f"{len(results)} rows, {len(column_names) + 4} columns (with analysis)",
+                'analysis_columns_added': ['result', 'soft_failure', 'presence', 'citations']
             },
             'generated_at': datetime.now(timezone.utc).isoformat(),
             'processing_complete': True
         }
         
-        logger.info(f"Job {job_id} processing completed successfully: {len(results)} records saved to CSV")
+        logger.info(f"Job {job_id} processing completed successfully: {len(results)} records analyzed and saved to CSV")
         
         return {
             'statusCode': 200,
@@ -416,3 +661,5 @@ def lambda_handler(event, context):
                 'timestamp': datetime.now(timezone.utc).isoformat()
             })
         }
+
+
