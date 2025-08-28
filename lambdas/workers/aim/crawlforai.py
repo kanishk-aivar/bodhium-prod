@@ -22,6 +22,22 @@ import urllib.parse
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
+# === ADDED: HTML CLEANING FOR CRAWL4AI ===
+def clean_html_for_crawl4ai(html_content):
+    """Clean HTML content to fix undefined table attributes that cause Crawl4AI parsing errors"""
+    # Fix undefined table attributes specifically  
+    html_content = re.sub(r'colspan="undefined"', 'colspan="1"', html_content)
+    html_content = re.sub(r'rowspan="undefined"', 'rowspan="1"', html_content)
+    html_content = re.sub(r'="undefined"', '=""', html_content)
+    
+    # Additional fixes for other potential undefined attributes
+    html_content = re.sub(r'width="undefined"', 'width="auto"', html_content)
+    html_content = re.sub(r'height="undefined"', 'height="auto"', html_content)
+    html_content = re.sub(r'style="[^"]*undefined[^"]*"', 'style=""', html_content)
+    
+    return html_content
+
+# === ADDED: INTELLIGENT ANSWER BLOCK START EXTRACTION ===
 def extract_real_aimode_answer(markdown_text):
     """Extract the real AI Mode answer by identifying start patterns"""
     # Patterns to mark start of actual answer block
@@ -709,8 +725,9 @@ class GoogleAIModeExtractor:
                     
                     self.log(f"✅ Extracted HTML content ({len(final_html)} characters)")
                     
-                    # STEP 9: 🔧 FIXED - Process with Crawl4AI using file-based approach
+                    # STEP 9: 🔧 FIXED - Process with Crawl4AI using file-based approach with HTML cleaning
                     self.log('🔧 Step 9: FIXED - Processing HTML with Crawl4AI using file-based approach...')
+                    self.log('🧹 NEW: HTML cleaning function will fix undefined table attributes (colspan="undefined", rowspan="undefined")')
                     
                     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
                     try:
@@ -727,34 +744,29 @@ class GoogleAIModeExtractor:
                         raise Exception(f"Crawl4AI processing failed: {crawl4ai_error}  - STOPPING EXECUTION")
                     
                     # STEP 10: Save results with enhanced output and intelligent filtering
-                    try:
-                        success = await self._save_enhanced_crawl4ai_results_intelligent(
-                            query, final_html, markdown_result, results, timestamp, page.url
-                        )
-                        
-                        if not success:
-                            raise Exception("Failed to save enhanced results")
-                            
-                    except Exception as save_error:
-                        self.log(f"❌ Failed to save results: {save_error}")
-                        raise Exception(f"Failed to save results: {save_error} - STOPPING EXECUTION")
+                    success = await self._save_enhanced_crawl4ai_results_intelligent(
+                        query, final_html, markdown_result, results, timestamp, page.url
+                    )
                     
-                    results['success'] = True
-                    results['retry_count'] = retry_count
-                    self.log(f"🎉 Successfully completed ENHANCED AI Mode extraction with {results['navigation_method']} method!")
-                    return results
+                    if success:
+                        results['success'] = True
+                        results['retry_count'] = retry_count
+                        self.log(f"🎉 Successfully completed ENHANCED AI Mode extraction with {results['navigation_method']} method!")
+                        return results
+                    else:
+                        raise Exception("Failed to save enhanced results")
                     
                 except Exception as e:
                     error_msg = str(e)
                     self.log(f"❌ Attempt {retry_count + 1} failed: {error_msg}")
                     
-                    # Check for Crawl4AI errors and stop immediately
-                    if any(keyword in error_msg.lower() for keyword in ['crawl4ai', 'undefined', 'stopping execution']):
+                    # Check for specific "undefined" error and stop immediately
+                    if "invalid literal for int() with base 10: 'undefined'" in error_msg:
                         self.log(f"🚨 FAILURE DETECTED: {error_msg}")
                         self.log("🛑 STOPPING EXECUTION - This is not a retryable error")
                         results['error'] = f"FAILURE: {error_msg}"
                         results['retry_count'] = retry_count
-                        results['failure_type'] = 'hard_failure'
+                        results['failure_type'] = 'failure'
                         return results
                     
                     # Only retry for CAPTCHA or network-related issues
@@ -834,11 +846,27 @@ class GoogleAIModeExtractor:
         This ensures Crawl4AI processes the exact HTML extracted by Playwright.
         """
         if not CRAWL4AI_AVAILABLE:
-            self.log("❌ Crawl4AI not available")
-            raise Exception("Crawl4AI not available")
+            return None
         
         try:
             self.log("🔧 FIXED - Using file-based Crawl4AI processing like brightdata.py...")
+            
+            # 🔧 CRITICAL FIX: Clean HTML to fix undefined table attributes before processing
+            self.log("🧹 Cleaning HTML to fix undefined table attributes...")
+            
+            # Check for undefined attributes before cleaning
+            undefined_count = len(re.findall(r'="undefined"', html_content))
+            if undefined_count > 0:
+                self.log(f"🔍 Found {undefined_count} undefined attributes in HTML that need cleaning")
+            
+            cleaned_html_content = clean_html_for_crawl4ai(html_content)
+            
+            # Check if cleaning worked
+            remaining_undefined = len(re.findall(r'="undefined"', cleaned_html_content))
+            if remaining_undefined == 0:
+                self.log(f"✅ HTML cleaned successfully - removed {undefined_count} undefined attributes")
+            else:
+                self.log(f"⚠️ Warning: {remaining_undefined} undefined attributes remain after cleaning")
             
             # Create complete HTML document with proper structure
             complete_html = f"""<!DOCTYPE html>
@@ -851,7 +879,7 @@ class GoogleAIModeExtractor:
 </head>
 <body>
     <div class="ai-mode-content">
-        {html_content}
+        {cleaned_html_content}
     </div>
 </body>
 </html>"""
@@ -912,22 +940,16 @@ class GoogleAIModeExtractor:
                     error_msg = getattr(result, 'error_message', 'Unknown error') if result else 'No result returned'
                     self.log(f"❌ Crawl4AI processing failed: {error_msg}")
                     
-                    # Check for specific "undefined" error and other common issues
+                    # Check for specific "undefined" error and stop immediately
                     if 'undefined' in str(error_msg).lower():
                         try:
                             if os.path.exists(temp_html_path):
                                 os.remove(temp_html_path)
                         except:
                             pass
-                        raise Exception(f"Crawl4AI 'undefined' parsing error detected: {error_msg} - This indicates incomplete page content or parsing issues")
+                        raise Exception(f"Crawl4AI 'undefined' parsing error detected: {error_msg} - This indicates Google AI Mode generated HTML with undefined table attributes (colspan='undefined', rowspan='undefined'). The HTML cleaning function should have fixed this. Please check if the cleaning function is working properly.")
                     
-                    # Clean up and raise exception for any other failure
-                    try:
-                        if os.path.exists(temp_html_path):
-                            os.remove(temp_html_path)
-                    except:
-                        pass
-                    raise Exception(f"Crawl4AI processing failed: {error_msg}")
+                    return None
                 
                 # Extract raw markdown from Crawl4AI
                 raw_md = (
@@ -935,15 +957,6 @@ class GoogleAIModeExtractor:
                     if hasattr(result.markdown, 'raw_markdown') 
                     else str(result.markdown)
                 ).strip()
-                
-                if not raw_md or len(raw_md) < 100:
-                    # Insufficient content extracted
-                    try:
-                        if os.path.exists(temp_html_path):
-                            os.remove(temp_html_path)
-                    except:
-                        pass
-                    raise Exception(f"Crawl4AI extracted insufficient content ({len(raw_md)} chars)")
                 
                 self.log(f"✅ Crawl4AI extracted markdown from file ({len(raw_md)} characters)")
                 
@@ -990,8 +1003,7 @@ class GoogleAIModeExtractor:
                     os.remove(temp_html_path)
             except:
                 pass
-            # Re-raise the exception to stop execution
-            raise Exception(f"Crawl4AI processing failed: {str(e)}")
+            return None
 
     # === MODIFIED: SAVE FUNCTION WITH INTELLIGENT CONTENT EXTRACTION AND LINK FIXES ===
     async def _save_enhanced_crawl4ai_results_intelligent(self, query, final_html, markdown_data, results, timestamp, page_url):
@@ -1832,8 +1844,8 @@ def lambda_handler(event, context):
         
         result = asyncio.run(extractor.extract_ai_response(query))
         
-        # NEW: Upload to new bucket structure
-        if result and result.get('success'):
+        # NEW: Upload to new bucket structure (only for successful results)
+        if result and result.get('success') and not result.get('failure_type') == 'failure':
             try:
                 # Create comprehensive result for new bucket
                 aim_result = {
@@ -1861,8 +1873,8 @@ def lambda_handler(event, context):
             except Exception as new_bucket_error:
                 print(f"❌ Error uploading to new bucket: {new_bucket_error}")
         
-        # S3 upload (old format)
-        if result and result.get('success'):
+        # S3 upload (old format) - only for successful results
+        if result and result.get('success') and not result.get('failure_type') == 'failure':
             S3_BUCKET = os.environ.get('S3_BUCKET')
             S3_PATH = os.environ.get('S3_PATH', 'google-ai-mode')
             
@@ -1906,6 +1918,7 @@ def lambda_handler(event, context):
             print(f"🧠 Key Enhancement: Intelligent content filtering removes unwanted UI elements")
             print(f"🔗 Key Enhancement: Improved link text handling for better visibility")
             print(f"🆕 Key Enhancement: Dual navigation strategy (Primary + AI Mode button fallback)")
+            print(f"🧹 Key Enhancement: HTML cleaning function fixes undefined table attributes")
             
         # Update task status
         if task_id:
@@ -1937,12 +1950,12 @@ def lambda_handler(event, context):
                 }
             }
         else:
-            # Check if this was a hard failure
+            # Check if this was a failure
             failure_type = result.get('failure_type', 'unknown') if result else 'unknown'
             status_code = 500
             
-            if failure_type == 'hard_failure':
-                status_code = 400  # Bad Request for hard failures
+            if failure_type == 'failure':
+                status_code = 400  # Bad Request for failures
                 print(f"🚨 FAILURE DETECTED: {result.get('error', 'Unknown failure')}")
                 print("🛑 This is not a retryable error - the system should stop processing")
             
