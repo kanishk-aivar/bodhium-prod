@@ -53,13 +53,12 @@
       "memory_size": 3008
     },
     "adhoc-results": {
-      "function_name": "bodhium-results-poll",
-      "deployment_type": "code",
+      "function_name": "dev-csv-export",
+      "deployment_type": "container",
       "source_path": "lambdas/adhoc-results",
-      "handler": "lambda_function.lambda_handler",
-      "runtime": "python3.9",
-      "timeout": 300,
-      "memory_size": 512
+      "ecr_repo": "dev-csv-export",
+      "timeout": 900,
+      "memory_size": 3008
     }
   },
   "deployment_history": [
@@ -579,6 +578,48 @@
       "version": "v20250828-144050-e4fbbbd",
       "deployment_type": "code",
       "timestamp": "2025-08-28T14:41:09.779394",
+      "success": true
+    },
+    {
+      "lambda_name": "adhoc-results",
+      "version": "v20250829-084917-d49caf7",
+      "deployment_type": "container",
+      "timestamp": "2025-08-29T08:52:28.201301",
+      "success": false
+    },
+    {
+      "lambda_name": "adhoc-results",
+      "version": "v20250829-095554-d49caf7",
+      "deployment_type": "container",
+      "timestamp": "2025-08-29T09:56:35.316573",
+      "success": true
+    },
+    {
+      "lambda_name": "adhoc-results",
+      "version": "v20250829-100534-d49caf7",
+      "deployment_type": "container",
+      "timestamp": "2025-08-29T10:06:11.911783",
+      "success": true
+    },
+    {
+      "lambda_name": "adhoc-results",
+      "version": "v20250829-101618-d49caf7",
+      "deployment_type": "container",
+      "timestamp": "2025-08-29T10:16:52.254461",
+      "success": true
+    },
+    {
+      "lambda_name": "adhoc-results",
+      "version": "v20250829-102246-d49caf7",
+      "deployment_type": "container",
+      "timestamp": "2025-08-29T10:23:21.730603",
+      "success": true
+    },
+    {
+      "lambda_name": "adhoc-results",
+      "version": "v20250829-103515-d49caf7",
+      "deployment_type": "container",
+      "timestamp": "2025-08-29T10:35:49.577305",
       "success": true
     }
   ]
