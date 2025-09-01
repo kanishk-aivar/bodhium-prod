@@ -1084,6 +1084,58 @@ class GoogleAIOverviewExtractor:
             self.log("🔄 Using fallback approach")
             return await self.extract_ai_overview_fallback(query, max_wait_time)
 
+# Retry logic helper function
+def should_retry_error(error_message):
+    """Determine if an error should trigger a retry"""
+    if not error_message:
+        return False
+    
+    error_lower = str(error_message).lower()
+    
+    # Retryable errors
+    retryable_patterns = [
+        'timeout',
+        'connection',
+        'network',
+        'captcha',
+        'rate limit',
+        'temporary',
+        'unavailable',
+        'service error',
+        'internal server error',
+        'bad gateway',
+        'gateway timeout',
+        'brightdata',
+        'proxy',
+        'browser',
+        'playwright'
+    ]
+    
+    # Non-retryable errors (should fail immediately)
+    non_retryable_patterns = [
+        'authentication',
+        'unauthorized',
+        'forbidden',
+        'not found',
+        'invalid query',
+        'malformed',
+        'syntax error',
+        'permission denied'
+    ]
+    
+    # Check for non-retryable patterns first
+    for pattern in non_retryable_patterns:
+        if pattern in error_lower:
+            return False
+    
+    # Check for retryable patterns
+    for pattern in retryable_patterns:
+        if pattern in error_lower:
+            return True
+    
+    # Default to retry for unknown errors
+    return True
+
 # FIXED: Corrected database functions to handle UUID properly
 def get_secret(secret_name=None):
     if secret_name is None:
@@ -1544,6 +1596,8 @@ def lambda_handler(event, context):
     task_id = None
     job_id = None
     new_bucket_path = None
+    max_retries = 3
+    retry_count = 0
     
     try:
         print("🎯 Lambda function started (Google AI Overview Extractor)")
@@ -1554,6 +1608,7 @@ def lambda_handler(event, context):
         product_id = event.get('product_id', str(uuid.uuid4()))  # NEW: Extract product_id
         session_id = event.get('session_id')  # NEW: Extract session_id
         provided_task_id = event.get('task_id')  # NEW: Extract provided task_id
+        retry_count = event.get('retry_count', 0)  # NEW: Extract retry count
         
         print(f"📊 Job ID: {job_id}, Query ID: {query_id}, Product ID: {product_id}, Session ID: {session_id}")
         
@@ -1577,13 +1632,21 @@ def lambda_handler(event, context):
         try:
             task_id = create_llm_task(job_id, query_id, "GOOGLE_AI_OVERVIEW", product_id, product_name, session_id, provided_task_id)
             if task_id:
-                update_task_status(task_id, "running")
+                # Set status based on retry count
+                if retry_count > 0:
+                    status = f"retrying...({retry_count})"
+                    print(f"🔄 Retry attempt {retry_count}/{max_retries}")
+                else:
+                    status = "running"
+                
+                update_task_status(task_id, status)
                 # Update orchestration event with task_id
                 log_orchestration_event(job_id, "task_created", {
                     "query": query,
                     "task_id": task_id,
                     "product_id": product_id,  # NEW: Include product_id in logging
                     "session_id": session_id,  # NEW: Include session_id in logging
+                    "retry_count": retry_count,  # NEW: Include retry count in logging
                     "pipeline": "google_ai_overview_extraction",
                     "timestamp": datetime.now().isoformat()
                 })
@@ -1688,7 +1751,41 @@ def lambda_handler(event, context):
                     )
                 else:
                     error_msg = result.get('error', 'Unknown error') if result else 'No result returned'
-                    update_task_status(task_id, "failed", error_message=error_msg)
+                    
+                    # Check if we should retry
+                    if retry_count < max_retries and should_retry_error(error_msg):
+                        print(f"🔄 Task failed, will retry. Attempt {retry_count + 1}/{max_retries}")
+                        update_task_status(task_id, f"retrying...({retry_count + 1})")
+                        
+                        # Trigger retry by invoking this lambda again with incremented retry count
+                        retry_event = event.copy()
+                        retry_event['retry_count'] = retry_count + 1
+                        
+                        try:
+                            lambda_client = boto3.client('lambda')
+                            lambda_client.invoke(
+                                FunctionName=context.function_name,
+                                InvocationType='Event',  # Asynchronous
+                                Payload=json.dumps(retry_event)
+                            )
+                            print(f"✅ Retry invocation triggered for attempt {retry_count + 1}")
+                            
+                            return {
+                                'statusCode': 202,
+                                'body': json.dumps({
+                                    'message': f'Task failed, retry {retry_count + 1}/{max_retries} triggered',
+                                    'task_id': task_id,
+                                    'retry_count': retry_count + 1
+                                })
+                            }
+                        except Exception as retry_error:
+                            print(f"❌ Failed to trigger retry: {retry_error}")
+                            update_task_status(task_id, "failed", error_message=f"Retry failed: {retry_error}")
+                    else:
+                        # Max retries reached or non-retryable error
+                        if retry_count >= max_retries:
+                            error_msg = f"Max retries ({max_retries}) reached. Last error: {error_msg}"
+                        update_task_status(task_id, "failed", error_message=error_msg)
             except Exception as db_error:
                 print(f"⚠️ Failed to update task status: {db_error}")
         
@@ -1802,7 +1899,41 @@ def lambda_handler(event, context):
         print(f"❌ Lambda handler error: {e}")
         if task_id:
             try:
-                update_task_status(task_id, "failed", error_message=str(e))
+                # Check if we should retry on exception
+                if retry_count < max_retries and should_retry_error(str(e)):
+                    print(f"🔄 Exception occurred, will retry. Attempt {retry_count + 1}/{max_retries}")
+                    update_task_status(task_id, f"retrying...({retry_count + 1})")
+                    
+                    # Trigger retry by invoking this lambda again with incremented retry count
+                    retry_event = event.copy()
+                    retry_event['retry_count'] = retry_count + 1
+                    
+                    try:
+                        lambda_client = boto3.client('lambda')
+                        lambda_client.invoke(
+                            FunctionName=context.function_name,
+                            InvocationType='Event',  # Asynchronous
+                            Payload=json.dumps(retry_event)
+                        )
+                        print(f"✅ Retry invocation triggered for attempt {retry_count + 1}")
+                        
+                        return {
+                            'statusCode': 202,
+                            'body': json.dumps({
+                                'message': f'Exception occurred, retry {retry_count + 1}/{max_retries} triggered',
+                                'task_id': task_id,
+                                'retry_count': retry_count + 1,
+                                'error': str(e)
+                            })
+                        }
+                    except Exception as retry_error:
+                        print(f"❌ Failed to trigger retry: {retry_error}")
+                        error_msg = f"Max retries ({max_retries}) reached. Last error: {str(e)}" if retry_count >= max_retries else f"Retry failed: {retry_error}"
+                        update_task_status(task_id, "failed", error_message=error_msg)
+                else:
+                    # Max retries reached or non-retryable error
+                    error_msg = f"Max retries ({max_retries}) reached. Last error: {str(e)}" if retry_count >= max_retries else str(e)
+                    update_task_status(task_id, "failed", error_message=error_msg)
             except:
                 pass
         
