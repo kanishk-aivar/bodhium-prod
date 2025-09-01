@@ -35,9 +35,25 @@ CSV_OUTPUT_BUCKET = os.environ.get('CSV_OUTPUT_BUCKET')
 CSV_OUTPUT_PATH = os.environ.get('CSV_OUTPUT_PATH', 'csv-job-results/')
 GEMINI_AVAILABLE = os.environ.get('GEMINI_API_KEY') is not None
 
-# AWS clients
-secrets_client = boto3.client('secretsmanager', region_name=REGION_NAME)
-s3_client = boto3.client('s3', region_name=REGION_NAME)
+# AWS clients with timeout configuration
+secrets_client = boto3.client(
+    'secretsmanager', 
+    region_name=REGION_NAME,
+    config=boto3.session.Config(
+        connect_timeout=10,
+        read_timeout=30,
+        retries={'max_attempts': 2}
+    )
+)
+s3_client = boto3.client(
+    's3', 
+    region_name=REGION_NAME,
+    config=boto3.session.Config(
+        connect_timeout=10,
+        read_timeout=30,
+        retries={'max_attempts': 2}
+    )
+)
 
 # Thread lock for DataFrame updates
 df_lock = threading.Lock()
@@ -45,10 +61,29 @@ df_lock = threading.Lock()
 def get_rds_connection():
     """Get RDS connection from secrets manager"""
     try:
-        logger.info(f"Retrieving secret: {SECRET_NAME}")
-        secret_response = secrets_client.get_secret_value(SecretId=SECRET_NAME)
+        logger.info(f"Retrieving secret: {SECRET_NAME} from region: {REGION_NAME}")
+        
+        # Add timeout and error handling for secrets retrieval
+        import signal
+        
+        def timeout_handler(signum, frame):
+            raise TimeoutError("Secrets Manager call timed out after 30 seconds")
+        
+        # Set a 30-second timeout for the secrets call
+        signal.signal(signal.SIGALRM, timeout_handler)
+        signal.alarm(30)
+        
+        try:
+            secret_response = secrets_client.get_secret_value(SecretId=SECRET_NAME)
+            signal.alarm(0)  # Cancel the alarm
+            logger.info("Secret retrieved successfully")
+        except Exception as e:
+            signal.alarm(0)  # Cancel the alarm
+            logger.error(f"Failed to retrieve secret: {str(e)}")
+            raise
+        
         secret = json.loads(secret_response['SecretString'])
-        logger.info("Secret retrieved successfully")
+        logger.info("Secret parsed successfully")
         
         logger.info(f"Connecting to database: {secret.get('DB_HOST', 'unknown')}:{secret.get('DB_PORT', 5432)}")
         conn = psycopg2.connect(
@@ -63,7 +98,36 @@ def get_rds_connection():
         logger.info("Successfully connected to RDS PostgreSQL")
         return conn
     except Exception as e:
-        logger.error(f"Failed connecting to RDS: {str(e)}")
+        logger.error(f"Failed connecting to RDS via Secrets Manager: {str(e)}")
+        
+        # Fallback: Try using environment variables
+        logger.info("Attempting fallback connection using environment variables...")
+        try:
+            db_host = os.environ.get('DB_HOST')
+            db_name = os.environ.get('DB_NAME') 
+            db_user = os.environ.get('DB_USER')
+            db_password = os.environ.get('DB_PASSWORD')
+            db_port = os.environ.get('DB_PORT', '5432')
+            
+            if all([db_host, db_name, db_user, db_password]):
+                logger.info(f"Using environment variables for connection: {db_host}:{db_port}")
+                conn = psycopg2.connect(
+                    host=db_host,
+                    database=db_name,
+                    user=db_user,
+                    password=db_password,
+                    port=int(db_port),
+                    connect_timeout=10,
+                    options='-c statement_timeout=30s'
+                )
+                logger.info("Successfully connected to RDS PostgreSQL using environment variables")
+                return conn
+            else:
+                logger.error("Environment variables not available for database connection")
+                
+        except Exception as env_error:
+            logger.error(f"Fallback connection also failed: {str(env_error)}")
+        
         raise Exception(f"Database connection failed: {str(e)}")
 
 def check_job_completion_status(job_id):
@@ -327,6 +391,35 @@ def check_ai_overview_presence(content):
         return False
     return False
 
+def extract_citations_from_s3(s3_path):
+    """Extract citations from citations.json file in S3 folder"""
+    try:
+        # Parse the S3 path to get the folder
+        bucket_name = s3_path.split('/')[2]
+        folder_key = '/'.join(s3_path.split('/')[3:-1])  # Remove the filename, keep folder path
+        
+        if not folder_key:
+            return []
+        
+        # Try to read citations.json
+        citations_json_key = f"{folder_key}/citations.json"
+        
+        try:
+            response = s3_client.get_object(Bucket=bucket_name, Key=citations_json_key)
+            citations_data = json.loads(response['Body'].read().decode('utf-8'))
+            citations_urls = citations_data.get('citations', [])
+            
+            logger.info(f"Extracted {len(citations_urls)} citations from citations.json")
+            return citations_urls
+            
+        except Exception as e:
+            logger.info(f"citations.json not found for {s3_path}: {str(e)}")
+            return []
+            
+    except Exception as e:
+        logger.error(f"Error extracting citations from S3 for {s3_path}: {str(e)}")
+        return []
+
 def extract_citations(content):
     """Extract citations from the content"""
     citations = []
@@ -529,7 +622,58 @@ def analyze_citations_and_brand(s3_path, brand_name):
             logger.warning(f"No folder path found in S3 path: {s3_path}")
             return result
         
-        # List all citation files in the folder
+        # First, try to read citations.json (new format)
+        citations_json_key = f"{folder_key}/citations.json"
+        citations_urls = []
+        
+        try:
+            response = s3_client.get_object(Bucket=bucket_name, Key=citations_json_key)
+            citations_data = json.loads(response['Body'].read().decode('utf-8'))
+            citations_urls = citations_data.get('citations', [])
+            
+            # Set citation presence and count from citations.json
+            result['citation_presence'] = len(citations_urls) > 0
+            result['citation_count'] = len(citations_urls)
+            
+            logger.info(f"Found citations.json with {len(citations_urls)} citations")
+            
+            # For brand analysis, we still need to read the citation markdown files
+            if brand_name != "None" and citations_urls:
+                # List citation markdown files for brand analysis
+                try:
+                    list_response = s3_client.list_objects_v2(
+                        Bucket=bucket_name,
+                        Prefix=folder_key + "/citation_",
+                        MaxKeys=1000
+                    )
+                    
+                    if 'Contents' in list_response:
+                        citation_files = [obj['Key'] for obj in list_response['Contents'] if obj['Key'].endswith('.md')]
+                        
+                        # Analyze each citation file for brand mentions
+                        for citation_file in citation_files:
+                            try:
+                                file_response = s3_client.get_object(Bucket=bucket_name, Key=citation_file)
+                                content = file_response['Body'].read().decode('utf-8')
+                                
+                                # Check if brand name is present in this citation
+                                if brand_name.lower() in content.lower():
+                                    result['brand_count'] += 1
+                                    
+                            except Exception as e:
+                                logger.warning(f"Failed to read citation file {citation_file}: {str(e)}")
+                                continue
+                                
+                except Exception as e:
+                    logger.warning(f"Failed to list citation files for brand analysis: {str(e)}")
+            
+            logger.info(f"Citation analysis for '{brand_name}': {result['citation_count']} citations, {result['brand_count']} with brand mentions")
+            return result
+            
+        except Exception as e:
+            logger.info(f"citations.json not found, falling back to legacy method: {str(e)}")
+        
+        # Fallback: Legacy method - count citation markdown files
         citation_files = []
         try:
             response = s3_client.list_objects_v2(
@@ -622,8 +766,10 @@ def process_row(index, row, df):
                 if row['llm_model_name'] == 'GOOGLE_AI_OVERVIEW':
                     result_data['presence'] = check_ai_overview_presence(json_content)
                 
-                # Extract citations
-                citations = extract_citations(json_content)
+                # Extract citations - try S3 first, then fallback to content parsing
+                citations = extract_citations_from_s3(s3_path)
+                if not citations:
+                    citations = extract_citations(json_content)
                 if citations:
                     result_data['citations'] = citations
                 
@@ -639,8 +785,10 @@ def process_row(index, row, df):
                 if row['llm_model_name'] == 'GOOGLE_AI_OVERVIEW':
                     result_data['presence'] = check_ai_overview_presence(content)
                 
-                # Extract citations
-                citations = extract_citations(content)
+                # Extract citations - try S3 first, then fallback to content parsing
+                citations = extract_citations_from_s3(s3_path)
+                if not citations:
+                    citations = extract_citations(content)
                 if citations:
                     result_data['citations'] = citations
                 
@@ -656,8 +804,10 @@ def process_row(index, row, df):
                 if row['llm_model_name'] == 'GOOGLE_AI_OVERVIEW':
                     result_data['presence'] = check_ai_overview_presence(content)
                 
-                # Extract citations
-                citations = extract_citations(content)
+                # Extract citations - try S3 first, then fallback to content parsing
+                citations = extract_citations_from_s3(s3_path)
+                if not citations:
+                    citations = extract_citations(content)
                 if citations:
                     result_data['citations'] = citations
             
@@ -720,8 +870,10 @@ def process_row_content_only(index, row, df):
                 if row['llm_model_name'] == 'GOOGLE_AI_OVERVIEW':
                     result_data['presence'] = check_ai_overview_presence(json_content)
                 
-                # Extract citations
-                citations = extract_citations(json_content)
+                # Extract citations - try S3 first, then fallback to content parsing
+                citations = extract_citations_from_s3(s3_path)
+                if not citations:
+                    citations = extract_citations(json_content)
                 if citations:
                     result_data['citations'] = citations
                 
@@ -737,8 +889,10 @@ def process_row_content_only(index, row, df):
                 if row['llm_model_name'] == 'GOOGLE_AI_OVERVIEW':
                     result_data['presence'] = check_ai_overview_presence(content)
                 
-                # Extract citations
-                citations = extract_citations(content)
+                # Extract citations - try S3 first, then fallback to content parsing
+                citations = extract_citations_from_s3(s3_path)
+                if not citations:
+                    citations = extract_citations(content)
                 if citations:
                     result_data['citations'] = citations
                 
@@ -754,8 +908,10 @@ def process_row_content_only(index, row, df):
                 if row['llm_model_name'] == 'GOOGLE_AI_OVERVIEW':
                     result_data['presence'] = check_ai_overview_presence(content)
                 
-                # Extract citations
-                citations = extract_citations(content)
+                # Extract citations - try S3 first, then fallback to content parsing
+                citations = extract_citations_from_s3(s3_path)
+                if not citations:
+                    citations = extract_citations(content)
                 if citations:
                     result_data['citations'] = citations
             
@@ -901,6 +1057,31 @@ def lambda_handler(event, context):
     """Main Lambda Handler for Job Results Processing with Content Analysis"""
     try:
         logger.info(f"Lambda invoked with event: {json.dumps(event, default=str)}")
+        
+        # Log environment diagnostics
+        logger.info(f"Environment diagnostics:")
+        logger.info(f"  AWS_REGION: {REGION_NAME}")
+        logger.info(f"  SECRET_NAME: {SECRET_NAME}")
+        logger.info(f"  CSV_OUTPUT_BUCKET: {CSV_OUTPUT_BUCKET}")
+        logger.info(f"  Lambda timeout: {context.get_remaining_time_in_millis() / 1000:.1f}s remaining")
+        
+        # Test AWS connectivity
+        try:
+            logger.info("Testing AWS Secrets Manager connectivity...")
+            # Quick test to see if we can at least list secrets (doesn't require specific secret access)
+            secrets_client.list_secrets(MaxResults=1)
+            logger.info("AWS Secrets Manager connectivity: OK")
+        except Exception as conn_test_error:
+            logger.error(f"AWS Secrets Manager connectivity test failed: {str(conn_test_error)}")
+        
+        # Test specific secret access
+        try:
+            logger.info(f"Testing access to specific secret: {SECRET_NAME}")
+            secrets_client.describe_secret(SecretId=SECRET_NAME)
+            logger.info("Secret access test: OK")
+        except Exception as secret_test_error:
+            logger.error(f"Secret access test failed: {str(secret_test_error)}")
+            logger.error("This may indicate IAM permission issues or incorrect secret name")
         
         # Extract job_id from multiple possible sources
         job_id = None

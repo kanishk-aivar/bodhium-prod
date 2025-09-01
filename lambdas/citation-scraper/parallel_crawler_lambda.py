@@ -274,6 +274,27 @@ class S3Results:
             logger.error(traceback.format_exc())
             return None
 
+    def save_citations_json(self, urls: List[str]) -> Optional[str]:
+        """Save citations.json with simple format for adhoc-results to read"""
+        if not self.bucket:
+            return None
+        key = f"{self.prefix}citations.json"
+        citations_data = {
+            "citations": urls
+        }
+        try:
+            self.client.put_object(
+                Bucket=self.bucket,
+                Key=key,
+                Body=json.dumps(citations_data, indent=2).encode('utf-8'),
+                ContentType='application/json'
+            )
+            logger.info(f"✅ Saved citations.json to s3://{self.bucket}/{key}")
+            return key
+        except Exception as e:
+            logger.error(f"❌ Failed to save citations.json: {e}")
+            return None
+
     def save_session_summary(self, meta: Dict[str, Any]) -> Optional[str]:
         if not self.bucket:
             return None
@@ -436,6 +457,10 @@ async def run_crawl(urls: List[str], job_id: str, mode: str, query: str, product
 
     duration = round(time.time() - start, 2)
     s3_summary = s3.list_results()
+    
+    # Save citations.json for adhoc-results to read
+    s3.save_citations_json(urls)
+    
     s3.save_session_summary({
         "job_id": job_id,
         "mode": mode,
