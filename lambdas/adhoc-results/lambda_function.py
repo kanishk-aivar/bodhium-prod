@@ -55,8 +55,7 @@ s3_client = boto3.client(
     )
 )
 
-# Thread lock for DataFrame updates
-df_lock = threading.Lock()
+# Thread lock for DataFrame updates (no longer needed with new approach)
 
 def get_rds_connection():
     """Get RDS connection from secrets manager"""
@@ -990,8 +989,8 @@ def analyze_content_from_csv(csv_content, max_workers=5):
                 query_texts.append(row['query_text'])
                 query_indices.append(index)
         
-        # Process queries in batches of 20
-        batch_size = 20
+        # Process queries in batches of 100
+        batch_size = 100
         for i in range(0, len(query_texts), batch_size):
             batch_queries = query_texts[i:i+batch_size]
             batch_indices = query_indices[i:i+batch_size]
@@ -1007,6 +1006,9 @@ def analyze_content_from_csv(csv_content, max_workers=5):
         # Step 2: Process content analysis and brand visibility in parallel
         logger.info("Step 2: Processing content analysis and brand visibility...")
         
+        # Create a thread-safe results dictionary
+        results_dict = {}
+        
         # Use ThreadPoolExecutor for parallel processing
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # Submit all rows for processing
@@ -1015,27 +1017,36 @@ def analyze_content_from_csv(csv_content, max_workers=5):
                 for index, row in df.iterrows()
             }
             
-            # Process completed futures
+            # Process completed futures and collect results
             for future in as_completed(future_to_index):
                 index = future_to_index[future]
                 try:
                     row_index, result_data = future.result()
-                    
-                    # Thread-safe DataFrame update
-                    with df_lock:
-                        df.at[row_index, 'result'] = result_data['result']
-                        df.at[row_index, 'soft_failure'] = result_data['soft_failure']
-                        df.at[row_index, 'presence'] = result_data['presence']
-                        df.at[row_index, 'citations'] = result_data['citations']
-                        df.at[row_index, 'citation_presence'] = result_data['citation_presence']
-                        df.at[row_index, 'citation_count'] = result_data['citation_count']
-                        df.at[row_index, 'brand_count'] = result_data['brand_count']
-                        df.at[row_index, 'brand_present'] = result_data['brand_present']
-                        
+                    results_dict[row_index] = result_data
                 except Exception as e:
                     logger.error(f"Error in future for row {index}: {str(e)}")
-                    with df_lock:
-                        df.at[index, 'result'] = f"Future error: {str(e)}"
+                    results_dict[index] = {
+                        'result': f"Future error: {str(e)}",
+                        'soft_failure': False,
+                        'presence': False,
+                        'citations': None,
+                        'citation_presence': False,
+                        'citation_count': 0,
+                        'brand_count': 0,
+                        'brand_present': False
+                    }
+        
+        # Step 3: Update DataFrame with collected results (single-threaded, safe)
+        logger.info("Step 3: Updating DataFrame with collected results...")
+        for row_index, result_data in results_dict.items():
+            df.at[row_index, 'result'] = result_data['result']
+            df.at[row_index, 'soft_failure'] = result_data['soft_failure']
+            df.at[row_index, 'presence'] = result_data['presence']
+            df.at[row_index, 'citations'] = result_data['citations']
+            df.at[row_index, 'citation_presence'] = result_data['citation_presence']
+            df.at[row_index, 'citation_count'] = result_data['citation_count']
+            df.at[row_index, 'brand_count'] = result_data['brand_count']
+            df.at[row_index, 'brand_present'] = result_data['brand_present']
         
         # Convert result and citations columns to string for JSON objects
         for index, row in df.iterrows():
@@ -1236,7 +1247,7 @@ def lambda_handler(event, context):
         # Step 4: Analyze content from CSV
         logger.info(f"Step 4: Analyzing content for {len(results)} records")
         try:
-            enhanced_csv, df = analyze_content_from_csv(csv_content, max_workers=5)
+            enhanced_csv, df = analyze_content_from_csv(csv_content, max_workers=50)
         except Exception as e:
             logger.error(f"Content analysis failed: {str(e)}")
             return {
@@ -1281,45 +1292,20 @@ def lambda_handler(event, context):
         else:
             logger.info(f"Presigned URL generated successfully, expires in 1 hour")
         
-        # Step 6: Calculate analysis summary
-        analysis_summary = {
-            'total_records': len(df),
-            'records_with_content': len(df[df['result'].notna() & (df['result'] != "No output path or task not completed")]),
-            'soft_failures': len(df[df['soft_failure'] == True]),
-            'ai_overview_present': len(df[df['presence'] == True]),
-            'records_with_citations': len(df[df['citations'].notna()]),
-            'records_with_citation_presence': len(df[df['citation_presence'] == True]),
-            'average_citation_count': round(df['citation_count'].mean(), 2) if len(df) > 0 else 0.0,
-            'records_with_brand': len(df[df['brand_name'] != "None"]),
-            'records_with_brand_present': len(df[df['brand_present'] == True])
-        }
-        
         # Step 7: Return success response
         success_response = {
             'status': 'completed',
             'job_id': job_id,
-            'summary': {
-                'total_records': len(results),
-                'completed_tasks': job_status['completed_tasks'],
-                'failed_tasks': job_status['failed_tasks'],
-                'total_tasks': job_status['total_tasks'],
-                'success_rate': round((job_status['completed_tasks'] / job_status['total_tasks']) * 100, 2)
-            },
-            'content_analysis': analysis_summary,
             'csv_details': {
                 'generated': True,
                 's3_location': s3_url,
-                'filename': filename,
-                'size_info': f"{len(results)} rows, {len(column_names) + 8} columns (with analysis)",
-                'analysis_columns_added': ['result', 'soft_failure', 'presence', 'citation_presence', 'citation_count', 'citations', 'brand_name', 'brand_present', 'brand_count']
+                'filename': filename
             },
             'download': {
                 'presigned_url': presigned_url,
                 'expires_in': '1 hour',
                 'direct_download': presigned_url is not None
-            },
-            'generated_at': datetime.now(timezone.utc).isoformat(),
-            'processing_complete': True
+            }
         }
         
         logger.info(f"Job {job_id} processing completed successfully: {len(results)} records analyzed and saved to CSV")

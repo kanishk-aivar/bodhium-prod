@@ -1098,6 +1098,7 @@ def should_retry_error(error_message):
         'playwright',
         'chatgpt',
         'openai'
+        'Input field not found',
     ]
     
     # Non-retryable errors (should fail immediately)
@@ -1105,7 +1106,6 @@ def should_retry_error(error_message):
         'authentication',
         'unauthorized',
         'forbidden',
-        'not found',
         'invalid query',
         'malformed',
         'syntax error',
