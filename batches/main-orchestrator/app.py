@@ -16,6 +16,7 @@ import psycopg2
 import argparse
 from datetime import datetime, timezone
 from decimal import Decimal
+import time
 
 # Set up structured logging
 logger = logging.getLogger()
@@ -645,6 +646,30 @@ def process_queries_data(selected_queries, options, job_id):
             "new_queries_processed": len(new_queries),
             "old_format_queries_processed": len(old_format_queries)
         })
+        
+        # Add 5-second delay after each product group (except for the last one)
+        if selected_queries.index(product_group) < len(selected_queries) - 1:
+            logger.info(f"[RATE_LIMIT] Applying 5-second delay after product group {selected_queries.index(product_group) + 1}/{len(selected_queries)}")
+            orchestration_logger.log_event(job_id, "RateLimitDelayStarted", {
+                "product_id": product_id,
+                "product_index": selected_queries.index(product_group) + 1,
+                "total_products": len(selected_queries),
+                "delay_seconds": 5,
+                "reason": "API rate limit prevention",
+                "status": "delaying"
+            })
+            
+            time.sleep(5)  # 5-second delay
+            
+            orchestration_logger.log_event(job_id, "RateLimitDelayCompleted", {
+                "product_id": product_id,
+                "product_index": selected_queries.index(product_group) + 1,
+                "total_products": len(selected_queries),
+                "delay_seconds": 5,
+                "reason": "API rate limit prevention",
+                "status": "delay_completed"
+            })
+            logger.info(f"[RATE_LIMIT] Completed 5-second delay after product group {selected_queries.index(product_group) + 1}/{len(selected_queries)}")
 
     # Log completion
     orchestration_logger.log_event(job_id, "OrchestrationCompleted", {
@@ -748,6 +773,7 @@ def main():
         logger.info(f"Lambda ARNs - AIO: {TARGETS.get('aio')}")
         logger.info(f"Lambda ARNs - AIM: {TARGETS.get('aim')}")
         logger.info(f"Lambda ARNs - Perplexity: {TARGETS.get('perplexity')}")
+        
         
         # Process the queries
         result = process_queries_data(selected_queries, options, job_id)

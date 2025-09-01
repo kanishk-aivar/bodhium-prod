@@ -530,27 +530,27 @@ def process_queries(job_id, query_objs, options, static_product_id=None, start_t
 
         # Add 3-second delay after each query's fanout (except for the last query)
         if i < len(query_objs) - 1:
-            logger.info(f"[RATE_LIMIT] Applying 3-second delay after query {i + 1}/{len(query_objs)} fanout batch")
+            logger.info(f"[RATE_LIMIT] Applying 5-second delay after query {i + 1}/{len(query_objs)} fanout batch")
             orchestration_logger.log_event(job_id, "RateLimitDelayStarted", {
                 "query_id": query_id,
                 "query_index": i + 1,
                 "total_queries": len(query_objs),
-                "delay_seconds": 3,
+                "delay_seconds": 5,
                 "reason": "API rate limit prevention",
                 "status": "delaying"
             })
             
-            time.sleep(3)  # 3-second delay
+            time.sleep(5)  # 5-second delay
             
             orchestration_logger.log_event(job_id, "RateLimitDelayCompleted", {
                 "query_id": query_id,
                 "query_index": i + 1,
                 "total_queries": len(query_objs),
-                "delay_seconds": 3,
+                "delay_seconds": 5,
                 "reason": "API rate limit prevention",
                 "status": "delay_completed"
             })
-            logger.info(f"[RATE_LIMIT] Completed 3-second delay after query {i + 1}/{len(query_objs)}")
+            logger.info(f"[RATE_LIMIT] Completed 5-second delay after query {i + 1}/{len(query_objs)}")
 
     # Store job_id to S3
     store_job_id_to_s3(job_id, JOB_ID_BUCKET, JOB_ID_PATH)
