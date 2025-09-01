@@ -365,6 +365,26 @@ def save_csv_to_s3(csv_content, job_id):
         logger.error(f"Failed to save CSV to S3: {str(e)}")
         return None, None
 
+def generate_presigned_url(bucket_name, key, expiration=3600):
+    """Generate a presigned GET URL for S3 object"""
+    try:
+        # Create a presigned URL that expires in 1 hour (3600 seconds) by default
+        presigned_url = s3_client.generate_presigned_url(
+            'get_object',
+            Params={
+                'Bucket': bucket_name,
+                'Key': key
+            },
+            ExpiresIn=expiration
+        )
+        
+        logger.info(f"Generated presigned URL for s3://{bucket_name}/{key}")
+        return presigned_url
+        
+    except Exception as e:
+        logger.error(f"Failed to generate presigned URL for s3://{bucket_name}/{key}: {str(e)}")
+        return None
+
 def check_soft_failure(content):
     """Check if the response contains a soft failure"""
     if isinstance(content, str):
@@ -461,10 +481,16 @@ def extract_model_specific_content(content, model_name, file_extension):
         if isinstance(content, dict):
             if model_name in ['GOOGLE_AI_MODE', 'GOOGLE_AI_OVERVIEW', 'perplexity']:
                 return content.get('content', '')
+            elif model_name == 'ChatGPT':
+                # For ChatGPT JSON files, extract the content field
+                return content.get('content', '')
         elif isinstance(content, str):
             try:
                 json_content = json.loads(content)
                 if model_name in ['GOOGLE_AI_MODE', 'GOOGLE_AI_OVERVIEW', 'perplexity']:
+                    return json_content.get('content', '')
+                elif model_name == 'ChatGPT':
+                    # For ChatGPT JSON files, extract the content field
                     return json_content.get('content', '')
             except:
                 pass
@@ -473,10 +499,12 @@ def extract_model_specific_content(content, model_name, file_extension):
         # For ChatGPT markdown files, extract only the Response Content section
         if isinstance(content, str):
             # Find the "## Response Content" section
-            # response_content_match = re.search(r'## Response Content\s*\n\n(.*?)(?=\n---|\n###|\Z)', content, re.DOTALL)
-            # if response_content_match:
-            #     return response_content_match.group(1).strip()
-            pass
+            response_content_match = re.search(r'## Response Content\s*\n\n(.*?)(?=\n---|\n###|\Z)', content, re.DOTALL)
+            if response_content_match:
+                return response_content_match.group(1).strip()
+            # If no Response Content section found, return the full content
+            return content
+    
     # Fallback: return original content if no specific extraction rule applies
     return content
 
@@ -1243,6 +1271,16 @@ def lambda_handler(event, context):
                 })
             }
         
+        # Step 5.5: Generate presigned URL for direct download
+        logger.info(f"Step 5.5: Generating presigned URL for {filename}")
+        presigned_url = generate_presigned_url(CSV_OUTPUT_BUCKET, filename, expiration=3600)  # 1 hour expiration
+        
+        if not presigned_url:
+            logger.warning("Failed to generate presigned URL, but CSV was saved successfully")
+            presigned_url = None
+        else:
+            logger.info(f"Presigned URL generated successfully, expires in 1 hour")
+        
         # Step 6: Calculate analysis summary
         analysis_summary = {
             'total_records': len(df),
@@ -1274,6 +1312,11 @@ def lambda_handler(event, context):
                 'filename': filename,
                 'size_info': f"{len(results)} rows, {len(column_names) + 8} columns (with analysis)",
                 'analysis_columns_added': ['result', 'soft_failure', 'presence', 'citation_presence', 'citation_count', 'citations', 'brand_name', 'brand_present', 'brand_count']
+            },
+            'download': {
+                'presigned_url': presigned_url,
+                'expires_in': '1 hour',
+                'direct_download': presigned_url is not None
             },
             'generated_at': datetime.now(timezone.utc).isoformat(),
             'processing_complete': True
