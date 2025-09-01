@@ -1166,11 +1166,23 @@ def lambda_handler(event, context):
         # NEW: Upload to new bucket structure
         if result and result.get('status') != 'failed':
             try:
-                # Get the formatted markdown content for new bucket
+                # Create comprehensive result for new bucket (similar to AIO lambda)
                 formatted_markdown = result.get('extraction', {}).get('formatted_markdown', '')
                 if formatted_markdown:
+                    chatgpt_result = {
+                        "job_id": job_id,
+                        "product_id": product_id,
+                        "query_id": query_id,
+                        "query": query,  # Include original query so it's used for folder naming
+                        "timestamp": datetime.now().isoformat(),
+                        "model": "ChatGPT",
+                        "content": formatted_markdown,
+                        "metadata": result.get('metadata', {}),
+                        "status": "success"
+                    }
+                    
                     new_bucket_path = upload_to_new_bucket_structure(
-                        formatted_markdown, job_id, product_id, query_id, 'text/markdown', 'md'
+                        chatgpt_result, job_id, product_id, query_id, 'application/json', 'json'
                     )
                     if new_bucket_path:
                         print(f"✅ Uploaded to new bucket structure: {new_bucket_path}")
