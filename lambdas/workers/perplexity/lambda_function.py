@@ -463,6 +463,7 @@ def should_retry_error(error_message):
         '502',  # Bad gateway
         '503',  # Service unavailable
         '504'   # Gateway timeout
+        '401',  # Unauthorized
     ]
     
     # Non-retryable errors (should fail immediately)
@@ -476,7 +477,6 @@ def should_retry_error(error_message):
         'syntax error',
         'permission denied',
         '400',  # Bad request
-        '401',  # Unauthorized
         '403',  # Forbidden
         '404'   # Not found
     ]

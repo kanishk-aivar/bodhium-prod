@@ -3,3 +3,4 @@ __pycache__/
 deploy.sh
 .DS_Store
 batches/web_scrapper
+deployment_config.json
