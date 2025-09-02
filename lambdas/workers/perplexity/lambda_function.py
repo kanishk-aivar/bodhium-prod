@@ -511,7 +511,7 @@ def invoke_citation_scraper_lambda(citations: List[str], job_id: str, query_id: 
             'job_id': job_id,
             'product_id': product_id,
             'mode': 'pplx',  # Use specific mode for Perplexity
-            'query': user_query[:100] if user_query else 'na',  # Truncate query if too long
+            'query': user_query if user_query else 'na',
             'brand_name': get_brand_name_from_db(job_id),  # Pass brand name directly
             'product_name': get_product_name_from_db(product_id) if product_id else 'Unknown Product'  # Pass product name directly
         }
