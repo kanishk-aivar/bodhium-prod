@@ -621,6 +621,118 @@
       "deployment_type": "container",
       "timestamp": "2025-08-29T10:35:49.577305",
       "success": true
+    },
+    {
+      "lambda_name": "adhoc-results",
+      "version": "v20250829-105211-d49caf7",
+      "deployment_type": "container",
+      "timestamp": "2025-08-29T10:52:50.743054",
+      "success": true
+    },
+    {
+      "lambda_name": "citation-scraper",
+      "version": "v20250829-142250-9e365c3",
+      "deployment_type": "container",
+      "timestamp": "2025-08-29T14:23:44.617507",
+      "success": true
+    },
+    {
+      "lambda_name": "adhoc-results",
+      "version": "v20250829-142628-9e365c3",
+      "deployment_type": "container",
+      "timestamp": "2025-08-29T14:27:02.760832",
+      "success": true
+    },
+    {
+      "lambda_name": "chatgpt",
+      "version": "v20250901-115648-9e365c3",
+      "deployment_type": "container",
+      "timestamp": "2025-09-01T11:57:44.212685",
+      "success": true
+    },
+    {
+      "lambda_name": "aio",
+      "version": "v20250901-135601-e8427e4",
+      "deployment_type": "container",
+      "timestamp": "2025-09-01T13:56:59.174503",
+      "success": true
+    },
+    {
+      "lambda_name": "aim",
+      "version": "v20250901-135722-e8427e4",
+      "deployment_type": "container",
+      "timestamp": "2025-09-01T13:58:18.843186",
+      "success": true
+    },
+    {
+      "lambda_name": "perplexity",
+      "version": "v20250901-135906-e8427e4",
+      "deployment_type": "code",
+      "timestamp": "2025-09-01T13:59:14.693373",
+      "success": true
+    },
+    {
+      "lambda_name": "chatgpt",
+      "version": "v20250901-141021-e8427e4",
+      "deployment_type": "container",
+      "timestamp": "2025-09-01T14:11:38.410595",
+      "success": true
+    },
+    {
+      "lambda_name": "chatgpt",
+      "version": "v20250901-142226-a7919c5",
+      "deployment_type": "container",
+      "timestamp": "2025-09-01T14:23:23.167386",
+      "success": true
+    },
+    {
+      "lambda_name": "adhoc-results",
+      "version": "v20250901-143341-a7919c5",
+      "deployment_type": "container",
+      "timestamp": "2025-09-01T14:34:13.012075",
+      "success": true
+    },
+    {
+      "lambda_name": "adhoc-results",
+      "version": "v20250901-151655-a7919c5",
+      "deployment_type": "container",
+      "timestamp": "2025-09-01T15:17:27.353512",
+      "success": true
+    },
+    {
+      "lambda_name": "adhoc-results",
+      "version": "v20250901-162008-7a87b57",
+      "deployment_type": "container",
+      "timestamp": "2025-09-01T16:20:49.355933",
+      "success": true
+    },
+    {
+      "lambda_name": "adhoc-results",
+      "version": "v20250901-162253-7a87b57",
+      "deployment_type": "container",
+      "timestamp": "2025-09-01T16:23:25.391675",
+      "success": true
+    },
+    {
+      "lambda_name": "adhoc-results",
+      "version": "v20250901-163923-7a87b57",
+      "deployment_type": "container",
+      "timestamp": "2025-09-01T16:39:54.713085",
+      "success": true
+    },
+    {
+      "lambda_name": "adhoc-results",
+      "version": "v20250901-171303-7a87b57",
+      "deployment_type": "container",
+      "timestamp": "2025-09-01T17:13:35.875202",
+      "success": true
+    },
+    {
+      "lambda_name": "adhoc-results",
+      "version": "v20250902-091805-4f1dfe7",
+      "deployment_type": "container",
+      "timestamp": "2025-09-02T09:19:50.317252",
+      "success": true
     }
   ]
 }

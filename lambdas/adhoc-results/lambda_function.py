@@ -338,9 +338,9 @@ def save_csv_to_s3(csv_content, job_id):
             logger.error("CSV_OUTPUT_BUCKET environment variable not configured")
             raise Exception("S3 bucket not configured")
         
-        # Generate filename with timestamp
+        # Generate filename with timestamp in Adhoc/{job_id}/ format
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        filename = f"{CSV_OUTPUT_PATH.rstrip('/')}/job_results_{job_id}_{timestamp}.csv"
+        filename = f"Adhoc/{job_id}/{timestamp}.csv"
         
         # Upload to S3
         s3_client.put_object(
