@@ -1596,7 +1596,7 @@ def lambda_handler(event, context):
     task_id = None
     job_id = None
     new_bucket_path = None
-    max_retries = 3
+    max_retries = 10
     retry_count = 0
     
     try:

@@ -1170,7 +1170,7 @@ def invoke_citation_scraper_lambda(citations: List[str], job_id: str, query_id: 
 def lambda_handler(event, context):
     """AWS Lambda handler function"""
     task_id = None
-    max_retries = 3
+    max_retries = 10
     retry_count = 0
     
     try:
