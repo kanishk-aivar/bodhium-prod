@@ -23,20 +23,126 @@ from typing import List
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-# === ADDED: INTELLIGENT ANSWER BLOCK START EXTRACTION ===
-def extract_ai_overview_content(markdown_text):
-    """Extract the AI Overview content by identifying patterns"""
-    # Look for AI Overview section
-    ai_overview_pattern = r'(?:# AI [Oo]verview|AI [Oo]verview)'
-    ai_overview_match = re.search(ai_overview_pattern, markdown_text)
+# === IMPROVED: INTELLIGENT ANSWER BLOCK START EXTRACTION ===
+
+def clean_ai_overview_content(content):
+    """Clean AI Overview content to remove problematic image and link patterns"""
+    if not content:
+        return content
     
-    if ai_overview_match:
-        start_idx = ai_overview_match.start()
+    lines = content.split('\n')
+    cleaned_lines = []
+    
+    i = 0
+    while i < len(lines):
+        line = lines[i]
         
+        # Skip image syntax lines completely
+        if line.strip().startswith('![](') and line.strip().endswith(')'):
+            i += 1
+            continue
+        
+        # Skip empty image syntax lines
+        if line.strip() == '![]()':
+            i += 1
+            continue
+        
+        # Handle bullet point links with empty text
+        if line.strip().startswith('* [') and '](' in line and line.strip().endswith(')'):
+            # Extract URL from the link
+            url_match = re.search(r'\]\((.*?)\)', line)
+            if url_match:
+                url = url_match.group(1)
+                # Look for the next line which might contain the title
+                if i + 1 < len(lines):
+                    next_line = lines[i + 1].strip()
+                    # If next line looks like a title (not empty, not image, not link)
+                    if (next_line and 
+                        not next_line.startswith('![](') and 
+                        not next_line.startswith('* [') and 
+                        not next_line.startswith('[') and
+                        len(next_line) > 5):
+                        # Create proper link with title
+                        proper_link = f"* [{next_line}]({url})"
+                        cleaned_lines.append(proper_link)
+                        i += 2  # Skip both link and title lines
+                        continue
+                    else:
+                        # Use domain name as link text
+                        try:
+                            domain = urllib.parse.urlparse(url).netloc
+                            link_text = domain if domain else "Link"
+                        except:
+                            link_text = "Link"
+                        proper_link = f"* [{link_text}]({url})"
+                        cleaned_lines.append(proper_link)
+                        i += 1
+                        continue
+        
+        # Keep all other lines as they are
+        cleaned_lines.append(line)
+        i += 1
+    
+    return '\n'.join(cleaned_lines)
+
+def extract_ai_overview_content(markdown_text):
+    """Extract the AI Overview content by identifying patterns - generalized for any query"""
+    
+    # First, check if there's an error message about AI Overview not being available
+    error_pattern = r'AI Overview is not available for this search|Can\'t generate an AI overview right now'
+    error_match = re.search(error_pattern, markdown_text)
+    
+    # If there's an error message but actual content follows, remove the error message
+    if error_match:
+        # Check if there's actual content after the error message
+        if "**AI Overview**" in markdown_text[error_match.end():]:
+            markdown_text = markdown_text[error_match.end():]
+    
+    # PRIMARY TRUNCATION: "AI responses may include mistakes. Learn more" should be the FIRST truncation point
+    primary_truncation_pattern = r'AI responses may include mistakes\. Learn more'
+    primary_match = re.search(primary_truncation_pattern, markdown_text, re.MULTILINE | re.DOTALL)
+    if primary_match:
+        markdown_text = markdown_text[:primary_match.start()].strip()
+    
+    # AGGRESSIVE TRUNCATION: Look for other specific patterns that indicate the end of AI Overview content
+    aggressive_truncation_patterns = [
+        r'Thank you Your feedback helps Google improve\. See our Privacy Policy\.',
+        r'Report a problemClose Show more Explain this',
+        r'Access this menu with Ctrl\+Shift\+X',
+        r'Restricted Mode.*?Autocomplete',
+        r'People also ask Which conditioner is no 1\?',
+        r'Dive deeper in AI Mode',
+        r'Positive feedback Negative feedback Thank you',
+        r'Your feedback helps Google improve\. See our Privacy Policy\.'
+    ]
+    
+    # Try aggressive truncation for remaining patterns
+    for pattern in aggressive_truncation_patterns:
+        match = re.search(pattern, markdown_text, re.MULTILINE | re.DOTALL)
+        if match:
+            markdown_text = markdown_text[:match.start()].strip()
+            break
+    
+    # Look for AI Overview section with various patterns
+    ai_overview_patterns = [
+        r'(?:# AI [Oo]verview|AI [Oo]verview)',
+        r'\*\*AI Overview\*\*',
+        r'## AI Overview'
+    ]
+    
+    start_idx = -1
+    for pattern in ai_overview_patterns:
+        match = re.search(pattern, markdown_text)
+        if match:
+            start_idx = match.start()
+            break
+    
+    if start_idx >= 0:
         # Look for end markers after AI Overview
         end_markers = [
+            r'AI responses may include mistakes\. Learn more',  # PRIMARY truncation point - must be first
+            r'AI responses may include mistakes',  # Fallback truncation point
             r'Dive deeper in AI Mode',
-            r'AI responses may include mistakes',
             r'Positive feedback',
             r'Negative feedback',
             r'From sources across the web',
@@ -44,12 +150,21 @@ def extract_ai_overview_content(markdown_text):
             r'People also ask',
             r'---\n\*This content was extracted',
             r'# Search Results',
-            r'# Filters and topics'
+            r'# Filters and topics',
+            r'How it Works',
+            r'Show more',
+            r'^\s*\$\n#{1,3}\s',  # Any header after empty line
+            r'Types of Machine Learning',  # Section break for machine learning content
+            r'Thank you Your feedback helps Google improve',  # Additional truncation point
+            r'Report a problemClose Show more',  # Additional truncation point
+            r'Access this menu with Ctrl\+Shift\+X',  # Additional truncation point
+            r'Restricted Mode.*?Autocomplete',  # Footer content
+            r'People also ask Which conditioner is no 1\?'  # Specific content break
         ]
         
         end_idx = len(markdown_text)
         for marker in end_markers:
-            match = re.search(marker, markdown_text[start_idx:])
+            match = re.search(marker, markdown_text[start_idx:], re.MULTILINE | re.DOTALL)
             if match:
                 current_end = start_idx + match.start()
                 if current_end < end_idx:
@@ -57,6 +172,9 @@ def extract_ai_overview_content(markdown_text):
         
         # Extract the AI Overview content
         ai_overview_content = markdown_text[start_idx:end_idx].strip()
+        
+        # IMPORTANT: Content is truncated at "AI responses may include mistakes" 
+        # to exclude non-AI overview content like "People also ask" sections
         
         # If content is too short, it might not be the actual overview
         if len(ai_overview_content) < 100:
@@ -66,30 +184,109 @@ def extract_ai_overview_content(markdown_text):
             for i, line in enumerate(lines):
                 if i > 0 and len(line.strip()) > 0:  # Skip the header line
                     content_lines.append(line)
-                if i > 20:  # Look at first 20 lines max
+                if i > 50:  # Look at first 50 lines max
                     break
             
             if content_lines:
                 ai_overview_content = "\n".join([lines[0]] + content_lines)
         
+        # Clean the content to remove problematic image and link patterns
+        ai_overview_content = clean_ai_overview_content(ai_overview_content)
+        
+        # DYNAMIC SENTENCE REMOVAL: Remove specific unwanted sentences
+        unwanted_sentences = [
+            "AI overview right now. Try again later.",
+            "AI overview right now. Try again later",
+            "AI overview right now. Try again later",
+            "AI overview right now. Try again later"
+        ]
+        
+        for sentence in unwanted_sentences:
+            ai_overview_content = ai_overview_content.replace(sentence, "")
+        
+        # FINAL CLEANUP: Remove any remaining problematic content patterns
+        final_cleanup_patterns = [
+            r'Thank you Your feedback helps Google improve.*$',
+            r'Report a problem.*$',
+            r'Restricted Mode.*$',
+            r'People also ask.*$',
+            r'Dive deeper in AI Mode.*$',
+            r'Positive feedback.*$',
+            r'Negative feedback.*$'
+        ]
+        
+        for pattern in final_cleanup_patterns:
+            ai_overview_content = re.sub(pattern, '', ai_overview_content, flags=re.MULTILINE | re.DOTALL)
+        
+        # Remove any trailing whitespace and empty lines
+        ai_overview_content = re.sub(r'\n\s*\n\s*\n', '\n\n', ai_overview_content)
+        ai_overview_content = ai_overview_content.strip()
+        
         return ai_overview_content
     
     # Fallback: look for content that appears to be an overview
+    # This is a generalized approach that looks for paragraphs that might be an overview
     lines = markdown_text.split('\n')
+    
+    # Look for potential overview sections by identifying patterns in the text
     for i, line in enumerate(lines):
-        if "Several skincare brands" in line or "Top skincare brands" in line:
-            # Found potential overview content
-            start_idx = i
-            # Collect lines until we hit an end marker
-            content_lines = [lines[start_idx]]
-            for j in range(start_idx + 1, min(start_idx + 30, len(lines))):
-                if any(marker in lines[j] for marker in ["Dive deeper", "AI responses", "Feedback", "People also"]):
-                    break
-                if lines[j].strip():
-                    content_lines.append(lines[j])
+            # Check for common content patterns that indicate an overview
+            if any(pattern in line.lower() for pattern in [
+                "machine learning", "artificial intelligence", "several excellent cars", 
+                "top skincare brands", "enables computers", "type of artificial"
+            ]):
+                # Found potential overview content
+                start_idx = i
+                # Collect lines until we hit an end marker or section break
+                content_lines = [lines[start_idx]]
+                for j in range(start_idx + 1, min(start_idx + 50, len(lines))):
+                    # PRIMARY truncation point - stop at "AI responses may include mistakes. Learn more"
+                    if "AI responses may include mistakes. Learn more" in lines[j]:
+                        break
+                    # Fallback truncation point - stop at "AI responses may include mistakes"
+                    if "AI responses may include mistakes" in lines[j]:
+                        break
+                    if any(marker in lines[j] for marker in ["Dive deeper", "Feedback", "People also", "How it Works", "Thank you Your feedback", "Report a problem", "Restricted Mode"]):
+                        break
+                    if re.match(r'^#{1,3}\s', lines[j]):  # New header indicates section break
+                        break
+                    if lines[j].strip():
+                        content_lines.append(lines[j])
             
-            if len(content_lines) > 2:
-                return "# AI Overview\n\n" + "\n".join(content_lines)
+            if len(content_lines) > 2 and sum(len(line) for line in content_lines) > 100:
+                content = "# AI Overview\n\n" + "\n".join(content_lines)
+                # Clean the content
+                content = clean_ai_overview_content(content)
+                
+                # DYNAMIC SENTENCE REMOVAL: Remove specific unwanted sentences (fallback)
+                unwanted_sentences = [
+                    "AI overview right now. Try again later.",
+                    "AI overview right now. Try again later",
+                    "AI overview right now. Try again later",
+                    "AI overview right now. Try again later"
+                ]
+                
+                for sentence in unwanted_sentences:
+                    content = content.replace(sentence, "")
+                
+                # Apply final cleanup to fallback content too
+                final_cleanup_patterns = [
+                    r'Thank you Your feedback helps Google improve.*$',
+                    r'Report a problem.*$',
+                    r'Restricted Mode.*$',
+                    r'People also ask.*$',
+                    r'Dive deeper in AI Mode.*$',
+                    r'Positive feedback.*$',
+                    r'Negative feedback.*$'
+                ]
+                
+                for pattern in final_cleanup_patterns:
+                    content = re.sub(pattern, '', content, flags=re.MULTILINE | re.DOTALL)
+                
+                content = re.sub(r'\n\s*\n\s*\n', '\n\n', content)
+                content = content.strip()
+                
+                return content
     
     # If no clear AI Overview found, return a placeholder
     return "# AI Overview\n\nNo AI Overview content found."
@@ -228,6 +425,8 @@ class GoogleAIOverviewExtractor:
     def log(self, message):
         if self.verbose:
             print(message)
+
+
 
     # Keep all existing helper methods (anti-detection, human behavior, etc.)
     async def _add_human_behavior(self, page):
@@ -408,98 +607,180 @@ class GoogleAIOverviewExtractor:
             print(f"Cookie handling error: {e}")
             return False
 
-    async def _find_and_click_show_more(self, page):
-        """Find and click 'Show more' button in AI Overview section"""
-        self.log("🔍 Looking for 'Show more' button in AI Overview...")
+    async def _find_and_click_interactive_elements(self, page, target_texts=None, max_attempts=3):
+        """
+        Generalized method to find and click interactive elements like "Show more" or "Show all"
+        
+        Args:
+            page: Playwright page object
+            target_texts: List of text strings to look for (default: ["show more", "show all"])
+            max_attempts: Maximum number of attempts to find and click elements
+        """
+        if target_texts is None:
+            target_texts = ["show more", "show all"]
+            
+        self.log(f"🔍 Looking for interactive elements with text: {target_texts}...")
         
         # Add human-like behavior before clicking
         await self._human_like_navigation(page)
         await asyncio.sleep(random.uniform(1, 2))
         
-        # Enhanced selectors for "Show more" button in AI Overview
-        show_more_selectors = [
+        # Take screenshot before attempting to find elements
+        before_screenshot = os.path.join(self.downloads_path, f"before_interactive_elements_{int(time.time())}.png")
+        await page.screenshot(path=before_screenshot, full_page=True)
+        self.log(f"📸 Screenshot before looking for elements: {before_screenshot}")
+        
+        # Enhanced selectors for interactive elements
+        interactive_selectors = [
+            'button',
+            'div[role="button"]',
+            'a[role="button"]',
+            'span[role="button"]',
+            '[tabindex="0"]',
+            '.niO4u',
+            '.kHtcsd',
+            '.clOx1e',
+            '.sjVJQd',
+            '.VDgVie',
+            '.SlP8xc',
+            '[data-ved]',
+            '[data-hveid]',
+            # Dictionary-specific selectors
+            'div.xpdopen span.qLLird',
+            'div.xpdclose span.qLLird',
+            # AI Overview specific selectors
+            'div.UDZeY button',
+            'div.V3FYCf button',
+            'div.iDjcJe button',
+            # Show more/all specific selectors
             'button:has-text("Show more")',
-            'div[role="button"]:has-text("Show more")',
-            'a:has-text("Show more")',
+            'button:has-text("Show all")',
+            'div:has-text("Show more")',
+            'div:has-text("Show all")',
             'span:has-text("Show more")',
-            'button[aria-label*="Show more"]',
-            'div[aria-label*="Show more"]',
-            'button[title*="Show more"]',
-            'div[title*="Show more"]',
-            '[data-ved*="show"]',
-            '[data-testid*="show"]',
-            '[data-id*="show"]',
-            '.show-more-button'
+            'span:has-text("Show all")'
         ]
         
-        # Try direct selectors first
-        for selector in show_more_selectors:
-            try:
-                element = await page.query_selector(selector)
-                if element:
-                    element_text = await element.text_content()
-                    if element_text and 'show more' in element_text.lower():
-                        self.log(f"✅ Found show more button with selector: {selector}, text: '{element_text}'")
-                        
-                        # Human-like interaction
-                        await element.scroll_into_view_if_needed()
-                        await asyncio.sleep(random.uniform(1, 2))
-                        
-                        # Move mouse to element first
-                        box = await element.bounding_box()
-                        if box:
-                            await page.mouse.move(
-                                box['x'] + box['width'] / 2,
-                                box['y'] + box['height'] / 2
-                            )
-                        await asyncio.sleep(random.uniform(0.3, 0.7))
-                        
-                        # Try multiple click methods with human timing
-                        click_success = await self._try_multiple_click_methods_human(page, element)
-                        
-                        if click_success:
-                            self.log("✅ Show more button clicked successfully!")
-                            await asyncio.sleep(random.uniform(2, 4))
-                            return True
-                        
-            except Exception as e:
-                self.log(f"Show more selector {selector} failed: {e}")
-                continue
-        
-        # Try to find by searching all clickable elements
-        self.log("🔍 Fallback: Searching all clickable elements for Show more...")
-        try:
-            # Get all potentially clickable elements
-            clickable_elements = await page.query_selector_all('button, div[role="button"], a, span[role="button"], [tabindex]')
+        for attempt in range(max_attempts):
+            self.log(f"Attempt {attempt + 1} to find interactive elements...")
             
-            for element in clickable_elements:
+            # Try direct selectors first
+            for selector in interactive_selectors:
                 try:
-                    element_text = await element.text_content()
-                    if element_text and 'show more' in element_text.lower().strip():
-                        self.log(f"✅ Found Show more in clickable element: '{element_text.strip()}'")
-                        
-                        # Check if element is visible and interactable
-                        is_visible = await element.is_visible()
-                        if not is_visible:
+                    elements = await page.query_selector_all(selector)
+                    for element in elements:
+                        try:
+                            element_text = await element.text_content()
+                            if element_text and any(target_text.lower() in element_text.lower() for target_text in target_texts):
+                                self.log(f"✅ Found interactive element with selector: {selector}, text: '{element_text.strip()}'")
+                                
+                                # Check if element is visible
+                                is_visible = await element.is_visible()
+                                if not is_visible:
+                                    self.log(f"Element not visible, skipping: {element_text.strip()}")
+                                    continue
+                                    
+                                # Human-like interaction
+                                await element.scroll_into_view_if_needed()
+                                await asyncio.sleep(random.uniform(1, 2))
+                                
+                                # Take screenshot with element highlighted
+                                try:
+                                    await page.evaluate("""(element) => {
+                                        const originalBackground = element.style.backgroundColor;
+                                        const originalBorder = element.style.border;
+                                        element.style.backgroundColor = 'rgba(255, 0, 0, 0.3)';
+                                        element.style.border = '2px solid red';
+                                        return {originalBackground, originalBorder};
+                                    }""", element)
+                                    
+                                    highlight_screenshot = os.path.join(self.downloads_path, f"element_highlight_{int(time.time())}.png")
+                                    await page.screenshot(path=highlight_screenshot, full_page=True)
+                                    self.log(f"📸 Element highlighted screenshot: {highlight_screenshot}")
+                                    
+                                    # Restore original styles
+                                    await page.evaluate("""(element) => {
+                                        element.style.backgroundColor = '';
+                                        element.style.border = '';
+                                    }""", element)
+                                except Exception as e:
+                                    self.log(f"Error highlighting element: {e}")
+                                
+                                # Move mouse to element first
+                                box = await element.bounding_box()
+                                if box:
+                                    await page.mouse.move(
+                                        box['x'] + box['width'] / 2,
+                                        box['y'] + box['height'] / 2
+                                    )
+                                await asyncio.sleep(random.uniform(0.3, 0.7))
+                                
+                                # Try multiple click methods with human timing
+                                click_success = await self._try_multiple_click_methods_human(page, element)
+                                
+                                if click_success:
+                                    self.log(f"✅ '{element_text.strip()}' clicked successfully!")
+                                    await asyncio.sleep(random.uniform(2, 4))
+                                    
+                                    # Take screenshot after clicking
+                                    after_screenshot = os.path.join(self.downloads_path, f"after_click_{int(time.time())}.png")
+                                    await page.screenshot(path=after_screenshot, full_page=True)
+                                    self.log(f"📸 Screenshot after clicking: {after_screenshot}")
+                                    
+                                    return True
+                        except Exception as e:
+                            self.log(f"Error processing element: {e}")
                             continue
-                            
-                        # Human-like interaction
-                        await element.scroll_into_view_if_needed()
-                        await asyncio.sleep(random.uniform(1, 2))
-                        
-                        click_success = await self._try_multiple_click_methods_human(page, element)
-                        if click_success:
-                            self.log("✅ Show more button clicked via fallback search!")
-                            await asyncio.sleep(random.uniform(2, 4))
-                            return True
-                            
                 except Exception as e:
+                    self.log(f"Selector {selector} failed: {e}")
                     continue
+            
+            # Try JavaScript approach to find and click elements
+            self.log("🔍 Trying JavaScript approach to find interactive elements...")
+            try:
+                # Find elements by text content using JavaScript
+                button_found = await page.evaluate("""
+                    (targetTexts) => {
+                        const elements = Array.from(document.querySelectorAll('button, [role="button"], a, span, div'));
+                        for (const element of elements) {
+                            const text = element.textContent.toLowerCase();
+                            if (targetTexts.some(target => text.includes(target))) {
+                                // Check if element is visible
+                                const rect = element.getBoundingClientRect();
+                                if (rect.width > 0 && rect.height > 0) {
+                                    console.log("Found element with text:", element.textContent);
+                                    element.scrollIntoView({behavior: 'smooth', block: 'center'});
+                                    setTimeout(() => {
+                                        element.click();
+                                    }, 500);
+                                    return true;
+                                }
+                            }
+                        }
+                        return false;
+                    }
+                """, target_texts)
+                
+                if button_found:
+                    self.log(f"✅ Found and clicked interactive element via JavaScript!")
+                    await asyncio.sleep(random.uniform(2, 4))
                     
-        except Exception as e:
-            self.log(f"Fallback search failed: {e}")
+                    # Take screenshot after JavaScript click
+                    js_after_screenshot = os.path.join(self.downloads_path, f"after_js_click_{int(time.time())}.png")
+                    await page.screenshot(path=js_after_screenshot, full_page=True)
+                    self.log(f"📸 Screenshot after JavaScript click: {js_after_screenshot}")
+                    
+                    return True
+            except Exception as e:
+                self.log(f"JavaScript approach failed: {e}")
+            
+            # If we haven't found anything yet, scroll down a bit and try again
+            if attempt < max_attempts - 1:
+                self.log("Scrolling down to look for more elements...")
+                await page.evaluate("window.scrollBy(0, 300)")
+                await asyncio.sleep(random.uniform(1, 2))
         
-        self.log("⚠️ Could not find Show more button, continuing with available content")
+        self.log(f"⚠️ Could not find interactive elements with text: {target_texts}, continuing with available content")
         return False
 
     async def _try_multiple_click_methods_human(self, page, element):
@@ -708,11 +989,36 @@ class GoogleAIOverviewExtractor:
                     # STEP 5: Check for AI Overview section
                     self.log("🔍 Step 5: Looking for AI Overview section...")
                     
-                    # Check if AI Overview is present
+                    # Check if AI Overview is present - generalized approach
                     ai_overview_present = await page.evaluate("""
                         () => {
                             const pageText = document.body.innerText.toLowerCase();
-                            return pageText.includes('ai overview');
+                            
+                            // Check for text indicators
+                            const textIndicators = ['ai overview', 'ai mode'];
+                            if (textIndicators.some(indicator => pageText.includes(indicator))) {
+                                return true;
+                            }
+                            
+                            // Check for structural indicators
+                            const structuralIndicators = [
+                                '[aria-label="AI Overview"]',
+                                'div.UDZeY',
+                                'div[data-attrid*="ai_overview"]',
+                                'div[data-hveid*="AI"]',
+                                'svg + div.iDjcJe',
+                                'div.V3FYCf',
+                                'div.xpdopen',
+                                'div.xpdclose'
+                            ];
+                            
+                            for (const selector of structuralIndicators) {
+                                if (document.querySelector(selector)) {
+                                    return true;
+                                }
+                            }
+                            
+                            return false;
                         }
                     """)
                     
@@ -720,7 +1026,7 @@ class GoogleAIOverviewExtractor:
                         self.log("✅ AI Overview section found!")
                         
                         # Try to click "Show more" if available to expand AI Overview
-                        await self._find_and_click_show_more(page)
+                        await self._find_and_click_interactive_elements(page, ["show more"])
                         
                         # Wait for content to stabilize after possible expansion
                         await asyncio.sleep(random.uniform(3, 5))
@@ -729,6 +1035,26 @@ class GoogleAIOverviewExtractor:
                         expanded_screenshot = os.path.join(self.downloads_path, f"04_expanded_ai_overview_{retry_count + 1}.png")
                         await page.screenshot(path=expanded_screenshot, full_page=True)
                         results['debug_screenshots'].append(expanded_screenshot)
+                        
+                        # Try to click "Show all" for citations
+                        await self._find_and_click_interactive_elements(page, ["show all"])
+                        
+                        # Wait for citations to expand
+                        await asyncio.sleep(random.uniform(3, 5))
+                        
+                        # Take screenshot after citations expansion
+                        citations_screenshot = os.path.join(self.downloads_path, f"05_expanded_citations_{retry_count + 1}.png")
+                        await page.screenshot(path=citations_screenshot, full_page=True)
+                        results['debug_screenshots'].append(citations_screenshot)
+                        
+                        # Try to click any other "Show more" buttons that might have appeared
+                        await self._find_and_click_interactive_elements(page, ["show more"])
+                        await asyncio.sleep(random.uniform(2, 4))
+                        
+                        # Final screenshot after all expansions
+                        final_screenshot = os.path.join(self.downloads_path, f"06_final_expanded_{retry_count + 1}.png")
+                        await page.screenshot(path=final_screenshot, full_page=True)
+                        results['debug_screenshots'].append(final_screenshot)
                         
                     else:
                         self.log("⚠️ No AI Overview section found, but continuing with available content")
@@ -908,23 +1234,32 @@ class GoogleAIOverviewExtractor:
                 
                 self.log(f"✅ Crawl4AI extracted markdown from file ({len(raw_md)} characters)")
                 
-                # Extract links for sources section
-                links_list = []
+                # Extract sidebar links specifically (not all links)
+                sidebar_links = []
                 if result.links:
-                    internal_links = result.links.get("internal", [])
-                    external_links = result.links.get("external", [])
+                    # Look for links that appear to be from the sidebar/citations
+                    all_links = result.links.get("internal", []) + result.links.get("external", [])
                     
-                    # Combine all links and filter for external sources only
-                    all_links = internal_links + external_links
                     for link in all_links:
                         if isinstance(link, dict):
                             href = link.get('href', '')
                             text = link.get('text', '')
-                            # Only include external links that aren't Google internal
+                            
+                            # Only include links that look like external citations
                             if (href and text and 
-                                'google.com' not in href.lower() and 
-                                len(text.strip()) > 2):
-                                links_list.append({'text': text.strip(), 'url': href})
+                                len(text.strip()) > 5 and  # Longer text suggests actual content
+                                not any(unwanted in text.lower() for unwanted in ['preview', 'aim_query', 'show_more', 'dive_deeper', 'ai_mode', 'parsed.md', '.json', 'crawl4ai']) and
+                                not text.lower() in ['ai mode', 'shopping', 'images', 'short videos', 'forums', 'videos', 'news', 'web', 'books', 'past hour', 'past 24 hours', 'past week', 'past month', 'past year', 'verbatim', 'reconstructing', 'usa', 'moisturizing', 'reviews', 'curly hair']):
+                                
+                                # Extract domain name for better display
+                                try:
+                                    domain = urllib.parse.urlparse(href).netloc
+                                    if domain and domain != 'google.com':
+                                        sidebar_links.append({'text': text.strip(), 'url': href, 'domain': domain})
+                                except:
+                                    sidebar_links.append({'text': text.strip(), 'url': href})
+
+                links_list = sidebar_links
                 
                 self.log(f"🔗 Found {len(links_list)} external links")
                 
@@ -954,19 +1289,22 @@ class GoogleAIOverviewExtractor:
             return None
 
     async def _save_results(self, query, final_html, markdown_data, results, timestamp, page_url):
-        """Save results with AI Overview extraction"""
+        """Save results with AI Overview extraction using enhanced approach"""
         
         try:
-            self.log("💾 Saving AI Overview results...")
+            self.log("💾 Saving AI Overview results with enhanced approach...")
             
             # Extract raw markdown from the result
             raw_markdown = markdown_data.get('raw_markdown', '')
             links_found = markdown_data.get('links_found', [])
             
-            # Extract AI Overview content from the markdown
-            ai_overview_content = extract_ai_overview_content(raw_markdown)
+            # Clean the raw markdown FIRST to remove problematic patterns
+            cleaned_raw_markdown = clean_ai_overview_content(raw_markdown)
             
-            # Extract sources from links
+            # Extract AI Overview content from the CLEANED markdown
+            ai_overview_content = extract_ai_overview_content(cleaned_raw_markdown)
+            
+            # --- IMPROVED SIDEBAR LINK EXTRACTION ---
             sidebar_sources = []
             for link in links_found:
                 href = link.get('url', '').strip()
@@ -989,15 +1327,76 @@ class GoogleAIOverviewExtractor:
                 
                 sidebar_sources.append((text, href))
             
+            # --- FILTER OUT UNWANTED SOURCES ---
+            filtered_sources = []
+            for title, url in sidebar_sources:
+                # Skip Google search filter options
+                if title.lower() in [
+                    'ai mode', 'shopping', 'images', 'short videos', 'forums', 'videos', 
+                    'news', 'web', 'books', 'past hour', 'past 24 hours', 'past week', 
+                    'past month', 'past year', 'verbatim', 'reconstructing', 'usa', 
+                    'moisturizing', 'reviews', 'curly hair'
+                ]:
+                    continue
+                
+                # Skip unwanted entries by title patterns
+                if any(unwanted in title.lower() for unwanted in [
+                    'preview', 'aim_query', 'show_more', 'dive_deeper', 'ai_mode',
+                    'parsed.md', '.json', 'crawl4ai'
+                ]):
+                    continue
+                    
+                # Skip empty or invalid titles
+                if not title or title.strip() in ['•', '.', '-', '–', '—']:
+                    continue
+                    
+                filtered_sources.append((title, url))
+            
             # Remove duplicate links
             seen = set()
             unique_sources = []
-            for title, url in sidebar_sources:
+            for title, url in filtered_sources:
                 if url not in seen:
                     seen.add(url)
                     unique_sources.append((title, url))
             
             sources_markdown = '\n'.join([f"- [{title}]({url})" for title, url in unique_sources[:20]])
+            
+            # Create enhanced markdown with proper formatting
+            enhanced_markdown = f"""# Google AI Overview Response
+
+**Query:** {query}  
+**Timestamp:** {timestamp}  
+**Generated:** {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}
+
+---
+
+## AI Overview Content
+
+{ai_overview_content}
+
+---
+
+## Sources
+
+{sources_markdown}
+
+---
+
+## Metadata
+
+- **Extraction Method:** File-based Crawl4AI Processing
+- **Response Length:** {len(ai_overview_content)} characters
+- **Links Found:** {len(unique_sources)}
+- **Status:** Success
+- **Source:** {page_url}
+- **File-based Processing:** ✅ Applied
+
+---
+
+*Generated by Google AI Overview Automation System (Enhanced Version)*
+
+"""
             
             # Generate safe filenames
             safe_query = "".join(c for c in query if c.isalnum() or c in (' ', '-', '_')).rstrip()[:50]
@@ -1008,17 +1407,17 @@ class GoogleAIOverviewExtractor:
             html_path = os.path.join(self.downloads_path, f"{file_prefix}_raw.html")
             raw_md_path = os.path.join(self.downloads_path, f"{file_prefix}_raw.md")
             
-            # Save AI Overview content
+            # Save enhanced markdown content
             with open(markdown_path, 'w', encoding='utf-8') as f:
-                f.write(ai_overview_content)
+                f.write(enhanced_markdown)
             
             # Save raw HTML
             with open(html_path, 'w', encoding='utf-8') as f:
                 f.write(final_html)
             
-            # Save raw markdown
+            # Save cleaned raw markdown (without problematic patterns)
             with open(raw_md_path, 'w', encoding='utf-8') as f:
-                f.write(raw_markdown)
+                f.write(cleaned_raw_markdown)
             
             # Save links as JSON for reference
             if unique_sources:
@@ -1026,6 +1425,15 @@ class GoogleAIOverviewExtractor:
                 with open(links_path, "w", encoding="utf-8") as f:
                     json.dump([{"title": title, "url": url} for title, url in unique_sources], f, indent=2, ensure_ascii=False)
                 results['files']['links'] = links_path
+            
+            # Prepare citations.json data for S3 upload only
+            if unique_sources:
+                citations_data = {
+                    "urls": [url for title, url in unique_sources],
+                    "mode": "ai_overview",
+                    "query": query
+                }
+                results['citations_data'] = citations_data
             
             results['files']['markdown'] = markdown_path
             results['files']['html'] = html_path
@@ -1036,25 +1444,28 @@ class GoogleAIOverviewExtractor:
                 'query': query,
                 'timestamp': timestamp,
                 'html_length': len(final_html),
+                'structured_markdown_length': len(enhanced_markdown),
                 'raw_markdown_length': len(raw_markdown),
                 'ai_overview_length': len(ai_overview_content),
                 'external_sources_found': len(unique_sources),
                 'url': page_url,
-                'approach': 'playwright_with_crawl4ai',
+                'approach': 'file_based_crawl4ai_processing',
                 'crawl4ai_used': CRAWL4AI_AVAILABLE,
                 'playwright_used': True,
                 'brightdata_used': self.use_brightdata,
                 'file_based_processing': True,
+                'enhanced_link_handling': True,
                 'session_id': self.session_id
             }
             
-            self.log(f"✅ AI Overview markdown saved: {markdown_path}")
+            self.log(f"✅ Enhanced AI Overview markdown saved: {markdown_path}")
             self.log(f"✅ HTML saved: {html_path}")
             self.log(f"✅ Raw markdown saved: {raw_md_path}")
             if unique_sources:
                 self.log(f"✅ Links JSON saved: {results['files']['links']}")
             self.log(f"📊 AI Overview content: {len(ai_overview_content)} chars")
             self.log(f"🔗 Links extracted: {len(unique_sources)}")
+            self.log(f"🧠 Enhanced link handling applied: ✅")
             
             return True
             
@@ -1713,7 +2124,7 @@ def lambda_handler(event, context):
                                 content_type = 'text/html'
                             elif file_type in ['markdown', 'raw_markdown']:
                                 content_type = 'text/markdown'
-                            elif file_type == 'links':
+                            elif file_type in ['links', 'citations']:
                                 content_type = 'application/json'
                             elif file_type == 'screenshot':
                                 content_type = 'image/png'
@@ -1727,6 +2138,19 @@ def lambda_handler(event, context):
                                 
                         except Exception as upload_error:
                             print(f"❌ Error uploading {file_type}: {upload_error}")
+                
+                # Upload citations.json to S3
+                if result.get('citations_data'):
+                    try:
+                        citations_content = json.dumps(result['citations_data'], indent=2, ensure_ascii=False).encode('utf-8')
+                        citations_s3_key = f"{S3_PATH}/{folder_name}/citations.json"
+                        uploaded_citations_key = upload_to_s3(citations_content, S3_BUCKET, citations_s3_key, 'application/json')
+                        
+                        if uploaded_citations_key:
+                            s3_keys['citations'] = f"s3://{S3_BUCKET}/{uploaded_citations_key}"
+                            print(f"✅ Citations uploaded to S3: s3://{S3_BUCKET}/{uploaded_citations_key}")
+                    except Exception as citations_error:
+                        print(f"❌ Error uploading citations: {citations_error}")
                 
                 if s3_keys:
                     result['s3_files'] = s3_keys
