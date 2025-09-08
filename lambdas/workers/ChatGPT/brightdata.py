@@ -320,8 +320,8 @@ def upload_html_to_s3(html_content, bucket_name, s3_path, timestamp, folder_name
         print(f"Error uploading HTML to S3: {e}")
         return None
 
-def upload_to_new_bucket_structure(content, job_id, product_id, query_id, content_type='text/markdown', file_extension='md'):
-    """Upload content to new bucket structure: brand_name/job_id/product_name/query_text/mode/response.md/json"""
+def upload_to_new_bucket_structure(content, job_id, product_id, query_id, content_type='text/markdown', file_extension='md', session_id=None):
+    """Upload content to new bucket structure: brand_name/job_id/session_id/product_name/query_text/mode/response.md/json"""
     try:
         new_bucket = 'bodhium-temp'
         s3_client = boto3.client('s3')
@@ -343,8 +343,11 @@ def upload_to_new_bucket_structure(content, job_id, product_id, query_id, conten
         product_name_safe = re.sub(r'[^a-zA-Z0-9\s]', '', product_name).replace(' ', '_').strip()
         query_text_safe = re.sub(r'[^a-zA-Z0-9\s]', '', query_text).replace(' ', '_').strip()
         
-        # Create new S3 key following the required structure: brand_name/job_id/product_name/query_text/mode/response.md/json
-        s3_key = f"{brand_name_safe}/{job_id}/{product_name_safe}/{query_text_safe}/cgpt/response.{file_extension}"
+        # Use session_id or fallback to 'no_session' if not provided
+        session_id_safe = session_id if session_id else 'no_session'
+        
+        # Create new S3 key following the required structure: brand_name/job_id/session_id/product_name/query_text/mode/response.md/json
+        s3_key = f"{brand_name_safe}/{job_id}/{session_id_safe}/{product_name_safe}/{query_text_safe}/cgpt/response.{file_extension}"
         
         if isinstance(content, str):
             body = content
@@ -1127,7 +1130,7 @@ def should_retry_error(error_message):
 
 # -------- Lambda Invocation --------
 
-def invoke_citation_scraper_lambda(citations: List[str], job_id: str, query_id: str, product_id: str, user_query: str, task_id: str) -> bool:
+def invoke_citation_scraper_lambda(citations: List[str], job_id: str, query_id: str, product_id: str, user_query: str, task_id: str, session_id: str = None) -> bool:
     """Invoke the citation-scraper lambda with the extracted citations"""
     try:
         if not citations:
@@ -1144,7 +1147,8 @@ def invoke_citation_scraper_lambda(citations: List[str], job_id: str, query_id: 
             'mode': 'cgpt',  # Use specific mode for ChatGPT
             'query': user_query if user_query else 'na',
             'brand_name': get_brand_name_from_db(job_id),  # Pass brand name directly
-            'product_name': get_product_name_from_db(product_id) if product_id else 'Unknown Product'  # Pass product name directly
+            'product_name': get_product_name_from_db(product_id) if product_id else 'Unknown Product',  # Pass product name directly
+            'session_id': session_id  # NEW: Pass session_id for S3 path structure
         }
         
         # Get the citation-scraper lambda function name from environment or use default
@@ -1246,7 +1250,7 @@ def lambda_handler(event, context):
                     }
                     
                     new_bucket_path = upload_to_new_bucket_structure(
-                        chatgpt_result, job_id, product_id, query_id, 'application/json', 'json'
+                        chatgpt_result, job_id, product_id, query_id, 'application/json', 'json', session_id
                     )
                     if new_bucket_path:
                         print(f"✅ Uploaded to new bucket structure: {new_bucket_path}")
@@ -1364,7 +1368,7 @@ def lambda_handler(event, context):
                                 seen_urls.add(url)
                         
                         citation_invocation_success = invoke_citation_scraper_lambda(
-                            unique_citation_urls, job_id, query_id, product_id, query, task_id
+                            unique_citation_urls, job_id, query_id, product_id, query, task_id, session_id
                         )
                         if citation_invocation_success:
                             logger.info(f"Successfully triggered citation-scraper lambda with {len(unique_citation_urls)} citations")

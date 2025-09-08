@@ -149,13 +149,14 @@ def extract_query_text_for_s3_path(content: Any) -> str:
 class S3Results:
     """
     Structure:
-      s3://{bucket}/brand_name/job_id/product_name/query_text/mode/citation_{i}.md
+      s3://{bucket}/brand_name/job_id/session_id/product_name/query_text/mode/citation_{i}.md
     """
     def __init__(self, job_id: str, mode: str, query: str, product_id: str = None, 
-                 brand_name: str = None, product_name: str = None):
+                 brand_name: str = None, product_name: str = None, session_id: str = None):
         self.job_id = job_id
         self.product_id = product_id
         self.query = query
+        self.session_id = session_id
         self.client = boto3.client('s3')
         self.bucket = _get_env_str('S3_BUCKET', '')
         
@@ -170,8 +171,11 @@ class S3Results:
         # Use standardized query text extraction for consistent S3 paths
         query_text_safe = extract_query_text_for_s3_path(self.query)
         
-        # Create new S3 prefix following the required structure: brand_name/job_id/product_name/query_text/mode/
-        self.prefix = f"{brand_name_safe}/{job_id}/{product_name_safe}/{query_text_safe}/{mode}/"
+        # Use session_id or fallback to 'no_session' if not provided
+        session_id_safe = session_id if session_id else 'no_session'
+        
+        # Create new S3 prefix following the required structure: brand_name/job_id/session_id/product_name/query_text/mode/
+        self.prefix = f"{brand_name_safe}/{job_id}/{session_id_safe}/{product_name_safe}/{query_text_safe}/{mode}/"
         
         logger.info(f"📦 S3 -> bucket='{self.bucket}', prefix='{self.prefix}'")
         logger.info(f"🔍 Context -> brand_name='{self.brand_name}', product_name='{self.product_name}', mode='{mode}'")
@@ -446,10 +450,10 @@ def create_crawler_config() -> CrawlerRunConfig:
 
 # ========= Crawl runner =========
 async def run_crawl(urls: List[str], job_id: str, mode: str, query: str, product_id: str = None, 
-                   brand_name: str = None, product_name: str = None) -> Dict[str, Any]:
+                   brand_name: str = None, product_name: str = None, session_id: str = None) -> Dict[str, Any]:
     start = time.time()
     s3 = S3Results(job_id=job_id, mode=mode, query=query, product_id=product_id, 
-                   brand_name=brand_name, product_name=product_name)
+                   brand_name=brand_name, product_name=product_name, session_id=session_id)
     successes = 0
     failures = 0
     saved_files: List[str] = []
@@ -576,6 +580,7 @@ def lambda_handler(event, context):
         product_id = event.get('product_id')  # Extract product_id from event
         brand_name = event.get('brand_name')  # Extract brand_name from event
         product_name = event.get('product_name')  # Extract product_name from event
+        session_id = event.get('session_id')  # NEW: Extract session_id from event
 
         if not urls or not isinstance(urls, list) or len(urls) == 0:
             return {
@@ -607,7 +612,7 @@ def lambda_handler(event, context):
 
         results = asyncio.run(
             run_crawl(urls=urls, job_id=job_id, mode=mode, query=query, product_id=product_id,
-                     brand_name=brand_name, product_name=product_name)
+                     brand_name=brand_name, product_name=product_name, session_id=session_id)
         )
         logger.info(f"🎉 Completed crawl with {results['metrics']['successful_crawls']} successes")
         return {
