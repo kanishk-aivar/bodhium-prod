@@ -92,6 +92,35 @@ def _safe(s: str, max_len: int = 120) -> str:
     cleaned = "_".join(allowed.strip().split())
     return cleaned[:max_len] if cleaned else "na"
 
+def filter_youtube_urls(urls: List[str]) -> List[str]:
+    """
+    Remove YouTube URLs from the list of URLs to crawl.
+    
+    Args:
+        urls: List of URLs to filter
+        
+    Returns:
+        List of URLs with YouTube URLs removed
+    """
+    filtered_urls = []
+    youtube_urls = []
+    
+    for url in urls:
+        if url and isinstance(url, str):
+            # Check for various YouTube domain patterns
+            if re.search(r'(youtube\.com|youtu\.be|m\.youtube\.com|www\.youtube\.com)', url.lower()):
+                youtube_urls.append(url)
+                logger.info(f"🚫 Filtered out YouTube URL: {url}")
+            else:
+                filtered_urls.append(url)
+    
+    if youtube_urls:
+        logger.info(f"🔍 Filtered out {len(youtube_urls)} YouTube URLs from {len(urls)} total URLs")
+    else:
+        logger.info(f"✅ No YouTube URLs found in {len(urls)} URLs")
+    
+    return filtered_urls
+
 def extract_query_text_for_s3_path(content: Any) -> str:
     """
     Standardized function to extract query text for S3 path generation.
@@ -555,6 +584,27 @@ def lambda_handler(event, context):
                 "body": json.dumps({"error": "Provide 'urls' or 'urls_to_crawl' as a non-empty list", "job_id": job_id}),
             }
 
+        # Filter out YouTube URLs before processing
+        original_count = len(urls)
+        urls = filter_youtube_urls(urls)
+        filtered_count = len(urls)
+        
+        if filtered_count == 0:
+            logger.warning(f"⚠️ All {original_count} URLs were YouTube URLs and filtered out")
+            return {
+                "statusCode": 400,
+                "headers": {"Content-Type": "application/json"},
+                "body": json.dumps({
+                    "error": "All provided URLs were YouTube URLs which are not supported for crawling",
+                    "job_id": job_id,
+                    "original_url_count": original_count,
+                    "filtered_url_count": filtered_count
+                }),
+            }
+        
+        if filtered_count < original_count:
+            logger.info(f"🔍 URL filtering complete: {original_count} -> {filtered_count} URLs (removed {original_count - filtered_count} YouTube URLs)")
+
         results = asyncio.run(
             run_crawl(urls=urls, job_id=job_id, mode=mode, query=query, product_id=product_id,
                      brand_name=brand_name, product_name=product_name)
@@ -591,7 +641,10 @@ if __name__ == "__main__":
     test_event = {
         "urls": [
             "https://www.gap.com/",
+            "https://www.youtube.com/watch?v=example",
+            "https://youtu.be/shortlink",
             "https://www2.hm.com/en_in/kids/shop-by-product/clothing.html",
+            "https://m.youtube.com/watch?v=mobile",
         ],
         "job_id": "local-test",
         "mode": "gpt",
