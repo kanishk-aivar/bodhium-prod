@@ -1943,7 +1943,7 @@ def lambda_handler(event, context):
     """AWS Lambda handler"""
     task_id = None
     job_id = None
-    max_retries = 10
+    max_retries = 15
     retry_count = 0
     
     try:

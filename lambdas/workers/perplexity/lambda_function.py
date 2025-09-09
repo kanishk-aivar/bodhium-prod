@@ -656,7 +656,7 @@ def lambda_handler(event, context):
     job_id = None
     query_id = None
     new_bucket_path = None
-    max_retries = 10
+    max_retries = 15
     retry_count = 0
 
     try:
@@ -979,6 +979,12 @@ def lambda_handler(event, context):
                     print(f"🔄 API error, will retry. Attempt {retry_count + 1}/{max_retries}")
                     update_task_status(task_id, f"retrying...({retry_count + 1})")
                     
+                    # Special handling for 429 rate limit errors - wait 30 seconds
+                    if status_code == 429:
+                        print(f"⏳ Rate limit (429) detected, waiting 30 seconds before retry...")
+                        time.sleep(30)
+                        print(f"✅ 30-second wait completed, proceeding with retry")
+                    
                     # Trigger retry by invoking this lambda again with incremented retry count
                     retry_event = event.copy()
                     retry_event['retry_count'] = retry_count + 1
@@ -1041,6 +1047,12 @@ def lambda_handler(event, context):
             if retry_count < max_retries and should_retry_error(str(e)):
                 print(f"🔄 Exception occurred, will retry. Attempt {retry_count + 1}/{max_retries}")
                 update_task_status(task_id, f"retrying...({retry_count + 1})")
+                
+                # Special handling for 429 rate limit errors - wait 30 seconds
+                if "429" in str(e) or "rate limit" in str(e).lower():
+                    print(f"⏳ Rate limit (429) detected in exception, waiting 30 seconds before retry...")
+                    time.sleep(30)
+                    print(f"✅ 30-second wait completed, proceeding with retry")
                 
                 # Trigger retry by invoking this lambda again with incremented retry count
                 retry_event = event.copy()
@@ -1126,6 +1138,12 @@ def lambda_handler(event, context):
                 if retry_count < max_retries and should_retry_error(str(e)):
                     print(f"🔄 Exception occurred, will retry. Attempt {retry_count + 1}/{max_retries}")
                     update_task_status(task_id, f"retrying...({retry_count + 1})")
+                    
+                    # Special handling for 429 rate limit errors - wait 30 seconds
+                    if "429" in str(e) or "rate limit" in str(e).lower():
+                        print(f"⏳ Rate limit (429) detected in exception, waiting 30 seconds before retry...")
+                        time.sleep(30)
+                        print(f"✅ 30-second wait completed, proceeding with retry")
                     
                     # Trigger retry by invoking this lambda again with incremented retry count
                     retry_event = event.copy()
