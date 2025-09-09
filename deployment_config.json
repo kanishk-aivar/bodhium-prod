@@ -55,8 +55,16 @@
     "adhoc-results": {
       "function_name": "dev-csv-export",
       "deployment_type": "container",
-      "source_path": "lambdas/adhoc-results",
+      "source_path": "lambdas/exporters/adhoc-results",
       "ecr_repo": "dev-csv-export",
+      "timeout": 900,
+      "memory_size": 3008
+    },
+    "citations-csv": {
+      "function_name": "dev-citations-export",
+      "deployment_type": "container",
+      "source_path": "lambdas/exporters/citation-csv",
+      "ecr_repo": "dev-citations-export",
       "timeout": 900,
       "memory_size": 3008
     }
@@ -732,6 +740,188 @@
       "version": "v20250902-091805-4f1dfe7",
       "deployment_type": "container",
       "timestamp": "2025-09-02T09:19:50.317252",
+      "success": true
+    },
+    {
+      "lambda_name": "aio",
+      "version": "v20250902-133826-edec339",
+      "deployment_type": "container",
+      "timestamp": "2025-09-02T13:39:19.320753",
+      "success": true
+    },
+    {
+      "lambda_name": "aim",
+      "version": "v20250902-133927-edec339",
+      "deployment_type": "container",
+      "timestamp": "2025-09-02T13:40:18.410353",
+      "success": true
+    },
+    {
+      "lambda_name": "chatgpt",
+      "version": "v20250902-134046-edec339",
+      "deployment_type": "container",
+      "timestamp": "2025-09-02T13:41:36.822341",
+      "success": true
+    },
+    {
+      "lambda_name": "perplexity",
+      "version": "v20250902-134145-edec339",
+      "deployment_type": "code",
+      "timestamp": "2025-09-02T13:41:53.989602",
+      "success": true
+    },
+    {
+      "lambda_name": "perplexity",
+      "version": "v20250902-142356-b657089",
+      "deployment_type": "code",
+      "timestamp": "2025-09-02T14:24:05.881404",
+      "success": true
+    },
+    {
+      "lambda_name": "aim",
+      "version": "v20250902-142412-b657089",
+      "deployment_type": "container",
+      "timestamp": "2025-09-02T14:25:21.122861",
+      "success": true
+    },
+    {
+      "lambda_name": "citations-csv",
+      "version": "v20250908-095423-3722c5e",
+      "deployment_type": "container",
+      "timestamp": "2025-09-08T09:56:24.842595",
+      "success": false
+    },
+    {
+      "lambda_name": "citations-csv",
+      "version": "v20250908-101840-3722c5e",
+      "deployment_type": "container",
+      "timestamp": "2025-09-08T10:19:16.223326",
+      "success": true
+    },
+    {
+      "lambda_name": "citations-csv",
+      "version": "v20250908-103955-3722c5e",
+      "deployment_type": "container",
+      "timestamp": "2025-09-08T10:39:59.788330",
+      "success": false
+    },
+    {
+      "lambda_name": "citations-csv",
+      "version": "v20250908-104057-3722c5e",
+      "deployment_type": "container",
+      "timestamp": "2025-09-08T10:41:35.030388",
+      "success": true
+    },
+    {
+      "lambda_name": "citations-csv",
+      "version": "v20250908-104705-3722c5e",
+      "deployment_type": "container",
+      "timestamp": "2025-09-08T10:47:38.068107",
+      "success": true
+    },
+    {
+      "lambda_name": "citations-csv",
+      "version": "v20250908-104836-3722c5e",
+      "deployment_type": "container",
+      "timestamp": "2025-09-08T10:49:08.967393",
+      "success": true
+    },
+    {
+      "lambda_name": "aio",
+      "version": "v20250908-123501-71ac126",
+      "deployment_type": "container",
+      "timestamp": "2025-09-08T12:35:58.763611",
+      "success": true
+    },
+    {
+      "lambda_name": "citation-scraper",
+      "version": "v20250908-132435-1672854",
+      "deployment_type": "container",
+      "timestamp": "2025-09-08T13:25:29.196956",
+      "success": true
+    },
+    {
+      "lambda_name": "citation-scraper",
+      "version": "v20250908-142538-aa328ab",
+      "deployment_type": "container",
+      "timestamp": "2025-09-08T14:26:34.375126",
+      "success": true
+    },
+    {
+      "lambda_name": "aio",
+      "version": "v20250908-145647-aa328ab",
+      "deployment_type": "container",
+      "timestamp": "2025-09-08T14:58:00.447492",
+      "success": true
+    },
+    {
+      "lambda_name": "aim",
+      "version": "v20250908-145800-aa328ab",
+      "deployment_type": "container",
+      "timestamp": "2025-09-08T14:58:56.948737",
+      "success": true
+    },
+    {
+      "lambda_name": "perplexity",
+      "version": "v20250908-145856-aa328ab",
+      "deployment_type": "code",
+      "timestamp": "2025-09-08T14:59:04.892694",
+      "success": true
+    },
+    {
+      "lambda_name": "chatgpt",
+      "version": "v20250908-145904-aa328ab",
+      "deployment_type": "container",
+      "timestamp": "2025-09-08T15:00:17.857104",
+      "success": true
+    },
+    {
+      "lambda_name": "citation-scraper",
+      "version": "v20250908-150017-aa328ab",
+      "deployment_type": "container",
+      "timestamp": "2025-09-08T15:01:24.646253",
+      "success": true
+    },
+    {
+      "lambda_name": "citation-scraper",
+      "version": "v20250908-173901-6412bfc",
+      "deployment_type": "container",
+      "timestamp": "2025-09-08T17:39:03.743280",
+      "success": false
+    },
+    {
+      "lambda_name": "citation-scraper",
+      "version": "v20250908-173927-6412bfc",
+      "deployment_type": "container",
+      "timestamp": "2025-09-08T17:40:27.539655",
+      "success": true
+    },
+    {
+      "lambda_name": "citation-scraper",
+      "version": "v20250909-093332-6412bfc",
+      "deployment_type": "container",
+      "timestamp": "2025-09-09T09:34:31.142592",
+      "success": true
+    },
+    {
+      "lambda_name": "citation-scraper",
+      "version": "v20250909-095059-6412bfc",
+      "deployment_type": "container",
+      "timestamp": "2025-09-09T09:51:54.730586",
+      "success": true
+    },
+    {
+      "lambda_name": "citation-scraper",
+      "version": "v20250909-100419-6412bfc",
+      "deployment_type": "container",
+      "timestamp": "2025-09-09T10:05:17.169982",
+      "success": true
+    },
+    {
+      "lambda_name": "citation-scraper",
+      "version": "v20250909-101536-6412bfc",
+      "deployment_type": "container",
+      "timestamp": "2025-09-09T10:16:33.982315",
       "success": true
     }
   ]

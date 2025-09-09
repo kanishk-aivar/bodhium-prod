@@ -124,6 +124,30 @@ class DeploymentConfig:
                     "ecr_repo": "bodhium-chatgpt-worker",
                     "timeout": 900,
                     "memory_size": 3008
+                },
+                "citation-scraper": {
+                    "function_name": "BodhiumSources",
+                    "deployment_type": "container",
+                    "source_path": "lambdas/citation-scraper",
+                    "ecr_repo": "bodhium-sources",
+                    "timeout": 900,
+                    "memory_size": 3008
+                },
+                "adhoc-results": {
+                    "function_name": "dev-csv-export",
+                    "deployment_type": "container",
+                    "source_path": "lambdas/exporters/adhoc-results",
+                    "ecr_repo": "dev-csv-export",
+                    "timeout": 900,
+                    "memory_size": 3008
+                },
+                "citations-csv": {
+                    "function_name": "dev-citations-export",
+                    "deployment_type": "container",
+                    "source_path": "lambdas/exporters/citation-csv",
+                    "ecr_repo": "dev-citations-export",
+                    "timeout": 900,
+                    "memory_size": 3008
                 }
             },
             "deployment_history": []
@@ -722,6 +746,7 @@ Examples:
   %(prog)s init-config                           # Initialize configuration file (required first step)
   %(prog)s deploy --lambda orchestrator         # Deploy single Lambda function
   %(prog)s deploy --lambda aio --no-cache       # Deploy with clean Docker build
+  %(prog)s deploy --multiple aio aim chatgpt    # Deploy multiple Lambda functions
   %(prog)s deploy-all                           # Deploy all Lambda functions
   %(prog)s deploy-all --no-cache                # Deploy all with clean Docker builds
   %(prog)s revert --lambda aio                  # Revert single Lambda to previous version
@@ -737,6 +762,7 @@ Lambda Functions:
   chatgpt       - ChatGPT worker (container deployment)
   citation-scraper - Citation scraper worker (container deployment)
   adhoc-results   - Adhoc results poll (code deployment)
+  citations-csv   - Citations CSV exporter (container deployment)
 Configuration:
   Requires deployment_config.json file. Use 'init-config' to create template.
         """
@@ -748,8 +774,8 @@ Configuration:
     
     parser.add_argument('--lambda', '-l', 
                        metavar='NAME',
-                       choices=['orchestrator', 'perplexity', 'aio', 'aim', 'chatgpt', 'citation-scraper', 'adhoc-results'],
-                       help='Lambda function name (orchestrator, perplexity, aio, aim, chatgpt, citation-scraper, adhoc-results)')
+                       choices=['orchestrator', 'perplexity', 'aio', 'aim', 'chatgpt', 'citation-scraper', 'adhoc-results', 'citations-csv'],
+                       help='Lambda function name (orchestrator, perplexity, aio, aim, chatgpt, citation-scraper, adhoc-results, citations-csv)')
     
     parser.add_argument('--version', '-v', 
                        metavar='TAG',
@@ -762,7 +788,7 @@ Configuration:
     parser.add_argument('--multiple', '-m', 
                        nargs='+', 
                        metavar='NAME',
-                       choices=['orchestrator', 'perplexity', 'aio', 'aim', 'chatgpt', 'citation-scraper', 'adhoc-results'],
+                       choices=['orchestrator', 'perplexity', 'aio', 'aim', 'chatgpt', 'citation-scraper', 'adhoc-results', 'citations-csv'],
                        help='Multiple lambda names for batch operations')
     
     parser.add_argument('--no-cache', 
@@ -783,12 +809,34 @@ Configuration:
     
     if args.action == 'deploy':
         lambda_name = getattr(args, 'lambda')
-        if not lambda_name:
-            print("Error: --lambda is required for deploy action")
-            sys.exit(1)
+        if args.multiple:
+            # Deploy multiple lambdas
+            success_count = 0
+            for lambda_name in args.multiple:
+                print(f"\n{'='*60}")
+                print(f"Deploying {lambda_name.upper()}")
+                print(f"{'='*60}")
+                if deployer.deploy_lambda(lambda_name, args.version, args.no_cache):
+                    success_count += 1
+                else:
+                    print(f"Failed to deploy {lambda_name}")
+            
+            print(f"\n{'='*60}")
+            if success_count == len(args.multiple):
+                print(f"All {len(args.multiple)} Lambda functions deployed successfully!")
+            else:
+                print(f"Deployed {success_count}/{len(args.multiple)} Lambda functions")
+            print(f"{'='*60}")
+            sys.exit(0 if success_count == len(args.multiple) else 1)
         
-        success = deployer.deploy_lambda(lambda_name, args.version, args.no_cache)
-        sys.exit(0 if success else 1)
+        elif lambda_name:
+            # Deploy single lambda
+            success = deployer.deploy_lambda(lambda_name, args.version, args.no_cache)
+            sys.exit(0 if success else 1)
+        
+        else:
+            print("Error: --lambda or --multiple is required for deploy action")
+            sys.exit(1)
     
     elif args.action == 'deploy-all':
         success = deployer.deploy_all(args.version, args.no_cache)
