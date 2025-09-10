@@ -34,7 +34,8 @@ SECRET_NAME = os.environ.get('RDS_DB_SECRET', 'dev/rds')
 REGION_NAME = os.environ.get('AWS_REGION', 'us-east-1')
 CSV_OUTPUT_BUCKET = os.environ.get('CSV_OUTPUT_BUCKET')
 CSV_OUTPUT_PATH = os.environ.get('CSV_OUTPUT_PATH', 'csv-job-results/')
-GEMINI_AVAILABLE = os.environ.get('GEMINI_API_KEY') is not None
+# Check if Gemini API key is available (but don't override GEMINI_AVAILABLE from import)
+GEMINI_API_KEY_AVAILABLE = os.environ.get('GEMINI_API_KEY') is not None
 
 # AWS clients with timeout configuration and connection pooling
 secrets_client = boto3.client(
@@ -471,8 +472,8 @@ def extract_model_specific_content(content, model_name, file_extension):
 
 def extract_brand_names_batch(query_texts):
     """Extract brand names and categories from multiple query texts using Gemini AI in a single request"""
-    if not GEMINI_AVAILABLE:
-        logger.warning("Gemini AI not available, cannot extract brand names")
+    if not GEMINI_AVAILABLE or not GEMINI_API_KEY_AVAILABLE:
+        logger.warning(f"Gemini AI not available - GEMINI_AVAILABLE: {GEMINI_AVAILABLE}, GEMINI_API_KEY_AVAILABLE: {GEMINI_API_KEY_AVAILABLE}")
         return ["None"] * len(query_texts), ["Non-Branded"] * len(query_texts)
     
     if not query_texts:
@@ -484,6 +485,8 @@ def extract_brand_names_batch(query_texts):
         if not gemini_api_key:
             logger.warning("GEMINI_API_KEY not found in environment variables")
             return ["None"] * len(query_texts), ["Non-Branded"] * len(query_texts)
+        
+        logger.info(f"Gemini API key found, processing {len(query_texts)} queries")
         
         client = genai.Client(api_key=gemini_api_key)
         model = "gemini-2.5-flash"
@@ -501,7 +504,10 @@ def extract_brand_names_batch(query_texts):
 
 Query 1: What are the best Apple smartphones compared to Samsung in USA?
 Query 2: What are the best Samsung tablets compared to Apple in USA?
-Query 3: How to choose the best laptop for gaming?"""),
+Query 3: How to choose the best laptop for gaming?
+Query 4: Will Harry's shave gel work well for men's wet shaving with a Philips Norelco or Braun electric?
+Query 5: Are Harry's deodorant scents long-lasting for men compared to Every Man Jack?
+Query 6: What are the top men's grooming brands with transparent pricing?"""),
                 ],
             ),
             types.Content(
@@ -510,7 +516,10 @@ Query 3: How to choose the best laptop for gaming?"""),
                     types.Part.from_text(text="""[
     {"query_number": 1, "brand_name": "Apple", "brand_category": "Branded"},
     {"query_number": 2, "brand_name": "Samsung", "brand_category": "Branded"},
-    {"query_number": 3, "brand_name": "None", "brand_category": "Non-Branded"}
+    {"query_number": 3, "brand_name": "None", "brand_category": "Non-Branded"},
+    {"query_number": 4, "brand_name": "Harry's", "brand_category": "Branded"},
+    {"query_number": 5, "brand_name": "Harry's", "brand_category": "Branded"},
+    {"query_number": 6, "brand_name": "None", "brand_category": "Non-Branded"}
 ]"""),
                 ],
             ),
@@ -537,8 +546,10 @@ Each object should have:
 - "brand_name": the extracted brand name or "None" if no brand is present
 - "brand_category": "Branded" if a brand name is found, "Non-Branded" if no brand is present
 
-A query is considered "Branded" if it explicitly mentions a specific brand name (e.g., Apple, Samsung, Nike, Coca-Cola, etc.).
+A query is considered "Branded" if it explicitly mentions a specific brand name (e.g., Apple, Samsung, Nike, Coca-Cola, Harry's, Philips Norelco, Braun, Every Man Jack, etc.).
 A query is considered "Non-Branded" if it asks about general categories, features, or comparisons without mentioning specific brand names.
+
+IMPORTANT: Look for ANY mention of a specific brand name in the query text, even if it's part of a comparison or question about multiple brands. If multiple brands are mentioned, extract the first one mentioned.
 
 Example format:
 [
@@ -558,6 +569,7 @@ Example format:
         # Parse the response to extract brand names and categories
         try:
             response_text = response.text
+            logger.info(f"Gemini response text: {response_text[:500]}...")  # Log first 500 chars of response
             response_json = json.loads(response_text)
             
             # Extract brand names and categories in order
@@ -906,7 +918,10 @@ def analyze_citations_from_csv(csv_content, max_workers=100, max_citations=50):
             batch_indices = query_indices[i:i+batch_size]
             
             logger.info(f"Processing batch {i//batch_size + 1}: {len(batch_queries)} queries")
+            logger.info(f"Sample queries in batch: {batch_queries[:3]}")  # Log first 3 queries for debugging
             brand_names, brand_categories = extract_brand_names_batch(batch_queries)
+            logger.info(f"Extracted brand names: {brand_names[:3]}")  # Log first 3 results for debugging
+            logger.info(f"Extracted brand categories: {brand_categories[:3]}")  # Log first 3 results for debugging
             
             # Update DataFrame with extracted brand names and categories
             for j, (brand_name, brand_category) in enumerate(zip(brand_names, brand_categories)):
