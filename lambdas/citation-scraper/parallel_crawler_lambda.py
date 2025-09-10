@@ -149,10 +149,10 @@ def extract_query_text_for_s3_path(content: Any) -> str:
 class S3Results:
     """
     Structure:
-      s3://{bucket}/brand_name/job_id/product_name/query_text/mode/citation_{i}.md
+      s3://{bucket}/brand_name/job_id/session_id/product_name/query_text/mode/citation_{i}.md
     """
     def __init__(self, job_id: str, mode: str, query: str, product_id: str = None, 
-                 brand_name: str = None, product_name: str = None):
+                 brand_name: str = None, product_name: str = None, session_id: str = None):
         self.job_id = job_id
         self.product_id = product_id
         self.query = query
@@ -170,8 +170,8 @@ class S3Results:
         # Use standardized query text extraction for consistent S3 paths
         query_text_safe = extract_query_text_for_s3_path(self.query)
         
-        # Create new S3 prefix following the required structure: brand_name/job_id/product_name/query_text/mode/
-        self.prefix = f"{brand_name_safe}/{job_id}/{product_name_safe}/{query_text_safe}/{mode}/"
+        # Create new S3 prefix following the required structure: brand_name/job_id/session_id/product_name/query_text/mode/
+        self.prefix = f"{brand_name_safe}/{job_id}/{session_id}/{product_name_safe}/{query_text_safe}/{mode}/"
         
         logger.info(f"📦 S3 -> bucket='{self.bucket}', prefix='{self.prefix}'")
         logger.info(f"🔍 Context -> brand_name='{self.brand_name}', product_name='{self.product_name}', mode='{mode}'")
@@ -446,10 +446,10 @@ def create_crawler_config() -> CrawlerRunConfig:
 
 # ========= Crawl runner =========
 async def run_crawl(urls: List[str], job_id: str, mode: str, query: str, product_id: str = None, 
-                   brand_name: str = None, product_name: str = None) -> Dict[str, Any]:
+                   brand_name: str = None, product_name: str = None, session_id: str = None) -> Dict[str, Any]:
     start = time.time()
     s3 = S3Results(job_id=job_id, mode=mode, query=query, product_id=product_id, 
-                   brand_name=brand_name, product_name=product_name)
+                   brand_name=brand_name, product_name=product_name, session_id=session_id)
     successes = 0
     failures = 0
     saved_files: List[str] = []
