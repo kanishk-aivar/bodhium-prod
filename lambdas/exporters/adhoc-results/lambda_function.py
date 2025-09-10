@@ -508,26 +508,26 @@ def extract_model_specific_content(content, model_name, file_extension):
     return content
 
 def extract_brand_names_batch(query_texts):
-    """Extract brand names from multiple query texts using Gemini AI in a single request"""
+    """Extract brand names and categories from multiple query texts using Gemini AI in a single request"""
     if not GEMINI_AVAILABLE:
         logger.warning("Gemini AI not available, cannot extract brand names")
-        return ["None"] * len(query_texts)
+        return ["None"] * len(query_texts), ["Non-Branded"] * len(query_texts)
     
     if not query_texts:
-        return []
+        return [], []
     
     try:
         # Get Gemini API key from environment
         gemini_api_key = os.environ.get("GEMINI_API_KEY")
         if not gemini_api_key:
             logger.warning("GEMINI_API_KEY not found in environment variables")
-            return ["None"] * len(query_texts)
+            return ["None"] * len(query_texts), ["Non-Branded"] * len(query_texts)
         
         client = genai.Client(api_key=gemini_api_key)
         model = "gemini-2.5-flash"
         
         # Build the batch query text
-        batch_query = "Extract brand names from the following queries:\n\n"
+        batch_query = "Extract brand names and categorize queries from the following:\n\n"
         for i, query_text in enumerate(query_texts, 1):
             batch_query += f"Query {i}: {query_text}\n"
         
@@ -535,18 +535,20 @@ def extract_brand_names_batch(query_texts):
             types.Content(
                 role="user",
                 parts=[
-                    types.Part.from_text(text="""Extract brand names from the following queries:
+                    types.Part.from_text(text="""Extract brand names and categorize queries from the following:
 
 Query 1: What are the best Apple smartphones compared to Samsung in USA?
-Query 2: What are the best Samsung tablets compared to Apple in USA?"""),
+Query 2: What are the best Samsung tablets compared to Apple in USA?
+Query 3: How to choose the best laptop for gaming?"""),
                 ],
             ),
             types.Content(
                 role="model",
                 parts=[
                     types.Part.from_text(text="""[
-    {"query_number": 1, "brand_name": "Apple"},
-    {"query_number": 2, "brand_name": "Samsung"}
+    {"query_number": 1, "brand_name": "Apple", "brand_category": "Branded"},
+    {"query_number": 2, "brand_name": "Samsung", "brand_category": "Branded"},
+    {"query_number": 3, "brand_name": "None", "brand_category": "Non-Branded"}
 ]"""),
                 ],
             ),
@@ -564,19 +566,23 @@ Query 2: What are the best Samsung tablets compared to Apple in USA?"""),
             ),
             response_mime_type="application/json",
             system_instruction=[
-                types.Part.from_text(text=f"""You are tasked to extract the brand name from each given google search query.
-You should extract only one brand per query.
+                types.Part.from_text(text=f"""You are tasked to extract the brand name and categorize each given google search query.
+You should extract only one brand per query and determine if the query is branded or non-branded.
 
 Return a JSON array with {len(query_texts)} objects, one for each query in order.
 Each object should have:
 - "query_number": the sequential number (1, 2, 3, etc.)
 - "brand_name": the extracted brand name or "None" if no brand is present
+- "brand_category": "Branded" if a brand name is found, "Non-Branded" if no brand is present
+
+A query is considered "Branded" if it explicitly mentions a specific brand name (e.g., Apple, Samsung, Nike, Coca-Cola, etc.).
+A query is considered "Non-Branded" if it asks about general categories, features, or comparisons without mentioning specific brand names.
 
 Example format:
 [
-    {{"query_number": 1, "brand_name": "Apple"}},
-    {{"query_number": 2, "brand_name": "None"}},
-    {{"query_number": 3, "brand_name": "Samsung"}}
+    {{"query_number": 1, "brand_name": "Apple", "brand_category": "Branded"}},
+    {{"query_number": 2, "brand_name": "None", "brand_category": "Non-Branded"}},
+    {{"query_number": 3, "brand_name": "Samsung", "brand_category": "Branded"}}
 ]"""),
             ],
         )
@@ -587,48 +593,55 @@ Example format:
             config=generate_content_config,
         )
         
-        # Parse the response to extract brand names
+        # Parse the response to extract brand names and categories
         try:
             response_text = response.text
             response_json = json.loads(response_text)
             
-            # Extract brand names in order
+            # Extract brand names and categories in order
             brand_names = []
+            brand_categories = []
             if isinstance(response_json, list):
                 # Sort by query_number to ensure correct order
                 sorted_results = sorted(response_json, key=lambda x: x.get("query_number", 0))
                 for result in sorted_results:
                     brand_name = result.get("brand_name", "None")
+                    brand_category = result.get("brand_category", "Non-Branded")
                     brand_names.append(brand_name)
+                    brand_categories.append(brand_category)
                 
                 # Ensure we have the right number of results
                 while len(brand_names) < len(query_texts):
                     brand_names.append("None")
+                    brand_categories.append("Non-Branded")
                 
                 # Trim if we got too many results
                 brand_names = brand_names[:len(query_texts)]
+                brand_categories = brand_categories[:len(query_texts)]
             else:
                 # Fallback if response format is unexpected
                 brand_names = ["None"] * len(query_texts)
+                brand_categories = ["Non-Branded"] * len(query_texts)
             
-            logger.info(f"Extracted {len(brand_names)} brand names from batch of {len(query_texts)} queries")
-            return brand_names
+            logger.info(f"Extracted {len(brand_names)} brand names and categories from batch of {len(query_texts)} queries")
+            return brand_names, brand_categories
             
         except json.JSONDecodeError:
             logger.warning(f"Failed to parse Gemini batch response as JSON: {response.text}")
-            return ["None"] * len(query_texts)
+            return ["None"] * len(query_texts), ["Non-Branded"] * len(query_texts)
             
     except Exception as e:
-        logger.error(f"Error extracting brand names from batch of {len(query_texts)} queries: {str(e)}")
-        return ["None"] * len(query_texts)
+        logger.error(f"Error extracting brand names and categories from batch of {len(query_texts)} queries: {str(e)}")
+        return ["None"] * len(query_texts), ["Non-Branded"] * len(query_texts)
 
 def extract_brand_name_from_query(query_text):
     """Extract brand name from single query text (wrapper for batch function)"""
     if not query_text:
-        return "None"
+        return "None", "Non-Branded"
     
-    batch_result = extract_brand_names_batch([query_text])
-    return batch_result[0] if batch_result else "None"
+    brand_names, brand_categories = extract_brand_names_batch([query_text])
+    return (brand_names[0] if brand_names else "None", 
+            brand_categories[0] if brand_categories else "Non-Branded")
 
 def analyze_citations_and_brand(s3_path, brand_name):
     """Analyze citations and brand presence from S3 folder"""
@@ -754,15 +767,18 @@ def process_row(index, row, df):
         'presence': False,
         'citations': None,
         'brand_name': 'None',
+        'brand_category': 'Non-Branded',
         'citation_presence': False,
         'citation_count': 0,
         'brand_count': 0,
         'brand_present': False
     }
     
-    # Extract brand name from query text
+    # Extract brand name and category from query text
     if pd.notna(row['query_text']):
-        result_data['brand_name'] = extract_brand_name_from_query(row['query_text'])
+        brand_name, brand_category = extract_brand_name_from_query(row['query_text'])
+        result_data['brand_name'] = brand_name
+        result_data['brand_category'] = brand_category
     
     if row['status'] == 'completed' and pd.notna(row['s3_output_path']):
         try:
@@ -974,6 +990,7 @@ def analyze_content_from_csv(csv_content, max_workers=5):
         df['citation_count'] = 0
         df['citations'] = None
         df['brand_name'] = 'None'
+        df['brand_category'] = 'Non-Branded'
         df['brand_present'] = False
         df['brand_count'] = 0
         
@@ -996,12 +1013,13 @@ def analyze_content_from_csv(csv_content, max_workers=5):
             batch_indices = query_indices[i:i+batch_size]
             
             logger.info(f"Processing batch {i//batch_size + 1}: {len(batch_queries)} queries")
-            brand_names = extract_brand_names_batch(batch_queries)
+            brand_names, brand_categories = extract_brand_names_batch(batch_queries)
             
-            # Update DataFrame with extracted brand names
-            for j, brand_name in enumerate(brand_names):
+            # Update DataFrame with extracted brand names and categories
+            for j, (brand_name, brand_category) in enumerate(zip(brand_names, brand_categories)):
                 if j < len(batch_indices):
                     df.at[batch_indices[j], 'brand_name'] = brand_name
+                    df.at[batch_indices[j], 'brand_category'] = brand_category
         
         # Step 2: Process content analysis and brand visibility in parallel
         logger.info("Step 2: Processing content analysis and brand visibility...")
@@ -1063,7 +1081,7 @@ def analyze_content_from_csv(csv_content, max_workers=5):
             'task_id', 'job_id', 'query_id', 'llm_model_name', 'query_text', 'query_type', 
             'status', 's3_output_path', 'error_message', 'created_at', 'completed_at', 
             'is_active', 'duration_seconds', 'result', 'soft_failure', 'presence', 
-            'citation_presence', 'citation_count', 'citations', 'brand_name', 
+            'citation_presence', 'citation_count', 'citations', 'brand_name', 'brand_category',
             'brand_present', 'brand_count'
         ]
         
@@ -1334,5 +1352,3 @@ def lambda_handler(event, context):
                 'timestamp': datetime.now(timezone.utc).isoformat()
             })
         }
-
-
