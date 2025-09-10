@@ -9,8 +9,11 @@ import uuid
 import logging
 import traceback
 import re
+import aiohttp
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
+from urllib.parse import urlparse, urljoin
+from base64 import b64decode
 
 # ========= Logging =========
 logging.basicConfig(
@@ -41,10 +44,13 @@ CrawlerRunConfig = None
 CacheMode = None
 RateLimiter = None
 MemoryAdaptiveDispatcher = None
+AsyncUrlSeeder = None
+SeedingConfig = None
 
 try:
     from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode, RateLimiter
     from crawl4ai.async_dispatcher import MemoryAdaptiveDispatcher
+    from crawl4ai import AsyncUrlSeeder, SeedingConfig
     logger.info("✅ crawl4ai components imported")
 except Exception as e:
     logger.error(f"❌ Failed to import crawl4ai: {e}")
@@ -92,35 +98,6 @@ def _safe(s: str, max_len: int = 120) -> str:
     cleaned = "_".join(allowed.strip().split())
     return cleaned[:max_len] if cleaned else "na"
 
-def filter_youtube_urls(urls: List[str]) -> List[str]:
-    """
-    Remove YouTube URLs from the list of URLs to crawl.
-    
-    Args:
-        urls: List of URLs to filter
-        
-    Returns:
-        List of URLs with YouTube URLs removed
-    """
-    filtered_urls = []
-    youtube_urls = []
-    
-    for url in urls:
-        if url and isinstance(url, str):
-            # Check for various YouTube domain patterns
-            if re.search(r'(youtube\.com|youtu\.be|m\.youtube\.com|www\.youtube\.com)', url.lower()):
-                youtube_urls.append(url)
-                logger.info(f"🚫 Filtered out YouTube URL: {url}")
-            else:
-                filtered_urls.append(url)
-    
-    if youtube_urls:
-        logger.info(f"🔍 Filtered out {len(youtube_urls)} YouTube URLs from {len(urls)} total URLs")
-    else:
-        logger.info(f"✅ No YouTube URLs found in {len(urls)} URLs")
-    
-    return filtered_urls
-
 def extract_query_text_for_s3_path(content: Any) -> str:
     """
     Standardized function to extract query text for S3 path generation.
@@ -144,6 +121,309 @@ def extract_query_text_for_s3_path(content: Any) -> str:
     query_text_safe = re.sub(r'[^a-zA-Z0-9\s]', '', query_text).replace(' ', '_').strip()
     
     return query_text_safe
+
+def get_domain_name(url: str) -> str:
+    """Extract domain name from URL"""
+    parsed_url = urlparse(url)
+    domain = parsed_url.netloc
+    if domain.startswith('www.'):
+        domain = domain[4:]
+    if ':' in domain:
+        domain = domain.split(':')[0]
+    logger.debug(f"🔍 Extracted domain '{domain}' from URL: {url}")
+    return domain
+
+def is_reddit_url(url: str) -> bool:
+    """Check if URL is a Reddit URL"""
+    domain = get_domain_name(url)
+    return 'reddit.com' in domain or 'redd.it' in domain
+
+def convert_reddit_url_to_json(url: str) -> str:
+    """Convert Reddit URL to JSON API URL"""
+    if not is_reddit_url(url):
+        return url
+    
+    # Remove trailing slash and add .json
+    if url.endswith('/'):
+        url = url[:-1]
+    
+    # Add .json to the end
+    json_url = url + '.json'
+    logger.info(f"🔄 Converted Reddit URL to JSON: {url} -> {json_url}")
+    return json_url
+
+async def fetch_reddit_json(url: str) -> Optional[Dict[str, Any]]:
+    """Fetch Reddit JSON data from URL"""
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'application/json',
+            'Accept-Language': 'en-US,en;q=0.9'
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, headers=headers, timeout=30) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    logger.info(f"✅ Successfully fetched Reddit JSON data from {url}")
+                    return data
+                else:
+                    logger.warning(f"⚠️ Failed to fetch Reddit JSON: {response.status} - {url}")
+                    return None
+    except Exception as e:
+        logger.error(f"❌ Error fetching Reddit JSON from {url}: {e}")
+        return None
+
+def parse_reddit_post(post_data: Dict[str, Any]) -> str:
+    """Parse Reddit post data and convert to markdown"""
+    try:
+        if 'data' not in post_data:
+            return "No post data found"
+        
+        post = post_data['data']
+        
+        # Extract post information
+        title = post.get('title', 'No Title')
+        author = post.get('author', 'Unknown')
+        subreddit = post.get('subreddit', 'Unknown')
+        score = post.get('score', 0)
+        num_comments = post.get('num_comments', 0)
+        created_utc = post.get('created_utc', 0)
+        selftext = post.get('selftext', '')
+        url = post.get('url', '')
+        
+        # Convert timestamp
+        created_date = datetime.fromtimestamp(created_utc, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+        
+        # Build markdown content
+        markdown_content = f"""# {title}
+
+**Subreddit:** r/{subreddit}  
+**Author:** u/{author}  
+**Score:** {score} points  
+**Comments:** {num_comments}  
+**Posted:** {created_date}  
+**URL:** {url}
+
+---
+
+"""
+        
+        # Add post content if it's a text post
+        if selftext:
+            markdown_content += f"## Post Content\n\n{selftext}\n\n---\n\n"
+        
+        return markdown_content
+        
+    except Exception as e:
+        logger.error(f"❌ Error parsing Reddit post: {e}")
+        return f"Error parsing Reddit post: {str(e)}"
+
+def parse_reddit_comments(comments_data: List[Dict[str, Any]], max_depth: int = 3) -> str:
+    """Parse Reddit comments and convert to markdown"""
+    try:
+        if not comments_data:
+            return ""
+        
+        markdown_content = "## Comments\n\n"
+        
+        def parse_comment(comment: Dict[str, Any], depth: int = 0) -> str:
+            if depth > max_depth:
+                return ""
+            
+            if 'data' not in comment:
+                return ""
+            
+            comment_data = comment['data']
+            
+            # Skip deleted/removed comments
+            if comment_data.get('body') in ['[deleted]', '[removed]', None]:
+                return ""
+            
+            author = comment_data.get('author', 'Unknown')
+            body = comment_data.get('body', '')
+            score = comment_data.get('score', 0)
+            created_utc = comment_data.get('created_utc', 0)
+            
+            # Convert timestamp
+            created_date = datetime.fromtimestamp(created_utc, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')
+            
+            # Indent based on depth
+            indent = "  " * depth
+            header_prefix = "#" * min(depth + 3, 6)  # Limit header depth
+            
+            comment_md = f"{indent}**{header_prefix} u/{author}** ({score} points) - {created_date}\n\n{indent}{body}\n\n"
+            
+            # Parse replies
+            replies = comment_data.get('replies', {})
+            if replies and isinstance(replies, dict) and 'data' in replies:
+                children = replies['data'].get('children', [])
+                for reply in children:
+                    if reply.get('kind') == 't1':  # Comment type
+                        comment_md += parse_comment(reply, depth + 1)
+            
+            return comment_md
+        
+        # Parse top-level comments
+        for comment in comments_data:
+            if comment.get('kind') == 't1':  # Comment type
+                markdown_content += parse_comment(comment)
+        
+        return markdown_content
+        
+    except Exception as e:
+        logger.error(f"❌ Error parsing Reddit comments: {e}")
+        return f"Error parsing Reddit comments: {str(e)}"
+
+async def crawl_reddit_url(url: str) -> Optional[str]:
+    """Crawl Reddit URL using JSON API and convert to markdown"""
+    try:
+        # Convert to JSON URL
+        json_url = convert_reddit_url_to_json(url)
+        
+        # Fetch JSON data
+        json_data = await fetch_reddit_json(json_url)
+        if not json_data:
+            return None
+        
+        # Parse the JSON response
+        markdown_content = ""
+        
+        # Reddit JSON response is typically a list with post and comments
+        if isinstance(json_data, list) and len(json_data) >= 1:
+            # First item is the post
+            post_data = json_data[0]
+            if 'data' in post_data and 'children' in post_data['data']:
+                children = post_data['data']['children']
+                if children and len(children) > 0:
+                    post = children[0]
+                    markdown_content += parse_reddit_post(post)
+            
+            # Second item (if exists) contains comments
+            if len(json_data) >= 2:
+                comments_data = json_data[1]
+                if 'data' in comments_data and 'children' in comments_data['data']:
+                    comments = comments_data['data']['children']
+                    markdown_content += parse_reddit_comments(comments)
+        
+        logger.info(f"✅ Successfully parsed Reddit content: {len(markdown_content)} characters")
+        return markdown_content
+        
+    except Exception as e:
+        logger.error(f"❌ Error crawling Reddit URL {url}: {e}")
+        return None
+
+async def discover_urls_for_parallel_crawl(root_url: str) -> List[str]:
+    """
+    Comprehensive URL discovery using multiple methods from batch-scrapper
+    """
+    logger.info(f"🔍 STARTING URL DISCOVERY: {root_url}")
+    domain = get_domain_name(root_url)
+    discovered_urls = []
+    
+    try:
+        max_urls = _get_env_int("MAX_URLS", 100)
+        logger.info(f"🔧 Configuring URL seeder with max_urls={max_urls}")
+        
+        # Method 1: Try sitemap discovery
+        logger.info("🔄 Trying URL Seeding with sitemap...")
+        async with AsyncUrlSeeder() as seeder:
+            sitemap_config = SeedingConfig(
+                source="sitemap",
+                extract_head=True,
+                live_check=False,
+                max_urls=max_urls,
+                verbose=False,
+                force=True
+            )
+            try:
+                sitemap_urls = await seeder.urls(domain, sitemap_config)
+                if sitemap_urls:
+                    logger.info(f"✅ Found {len(sitemap_urls)} URLs via sitemap")
+                    for url_info in sitemap_urls:
+                        discovered_urls.append(url_info['url'])
+                else:
+                    logger.warning("⚠️ No URLs found via sitemap")
+            except Exception as e:
+                logger.warning(f"⚠️ URL seeding with sitemap failed: {e}")
+
+        # Method 2: Try Common Crawl as backup
+        if not discovered_urls:
+            logger.info("🔄 Trying Common Crawl as backup...")
+            async with AsyncUrlSeeder() as seeder:
+                cc_config = SeedingConfig(
+                    source="cc",
+                    extract_head=False,
+                    max_urls=max_urls,
+                    verbose=False
+                )
+                try:
+                    cc_urls = await seeder.urls(domain, cc_config)
+                    if cc_urls:
+                        logger.info(f"✅ Found {len(cc_urls)} URLs via Common Crawl")
+                        for url_info in cc_urls:
+                            discovered_urls.append(url_info['url'])
+                    else:
+                        logger.warning("⚠️ No URLs found via Common Crawl")
+                except Exception as e:
+                    logger.warning(f"⚠️ Common Crawl failed: {e}")
+
+        # Method 3: Manual fallback with common paths
+        if not discovered_urls:
+            logger.info("🔄 Using manual URL discovery as fallback...")
+            common_paths = [
+                "", "/collections/all", "/collections/skincare", "/collections/haircare", "/collections/bundles",
+                "/pages/about", "/pages/ingredients", "/blogs/news", "/search", "/products", "/shop", "/categories",
+                "/new-arrivals", "/sale"
+            ]
+            for path in common_paths:
+                full_url = urljoin(root_url, path)
+                discovered_urls.append(full_url)
+            logger.info(f"✅ Added {len(discovered_urls)} URLs via manual discovery")
+
+        # Validate and deduplicate URLs
+        seen_urls = set()
+        unique_urls = []
+        base_domain = domain
+        
+        for url in discovered_urls:
+            if not url.startswith('http'):
+                url = f"https://{url}"
+            
+            try:
+                url_domain = urlparse(url).netloc.replace('www.', '')
+                if base_domain in url_domain and url not in seen_urls:
+                    seen_urls.add(url)
+                    unique_urls.append(url)
+            except Exception:
+                continue
+        
+        logger.info(f"🎯 Discovered {len(unique_urls)} unique URLs from domain {domain}")
+        return unique_urls[:max_urls]
+        
+    except Exception as e:
+        logger.error(f"❌ Error discovering URLs: {str(e)}")
+        return [root_url]  # Fallback to root URL
+
+def validate_and_deduplicate_urls(urls: List[str], domain: str) -> List[str]:
+    """Validate URLs and remove duplicates"""
+    valid_urls = []
+    seen_urls = set()
+    
+    for url in urls:
+        if not url.startswith('http'):
+            url = f"https://{url}"
+        
+        try:
+            url_domain = urlparse(url).netloc.replace('www.', '')
+            if domain in url_domain and url not in seen_urls:
+                seen_urls.add(url)
+                valid_urls.append(url)
+        except Exception:
+            continue
+    
+    logger.info(f"✅ Validated {len(valid_urls)} unique URLs for domain {domain}")
+    return valid_urls
 
 # ========= S3 results helper =========
 class S3Results:
@@ -278,10 +558,12 @@ class S3Results:
             return 'Unknown Product'
 
     def save_citation_markdown(self, content: str, idx: int) -> Optional[str]:
-        if not self.bucket:
-            logger.warning("⚠️ No S3_BUCKET set; skipping save.")
-            return None
-        key = f"{self.prefix}citation_{idx}.md"
+        # Create local results directory with S3 structure
+        results_dir = f"results/{self.prefix}"
+        os.makedirs(results_dir, exist_ok=True)
+        
+        # Save locally with S3 structure
+        local_file = f"{results_dir}citation_{idx}.md"
         header = (
             f"# Citation {idx}\n\n"
             f"**Saved At:** {datetime.now(timezone.utc).isoformat()}\n\n"
@@ -289,6 +571,20 @@ class S3Results:
             f"**Job ID:** {self.job_id}\n\n"
             "---\n\n"
         )
+        
+        try:
+            with open(local_file, 'w', encoding='utf-8') as f:
+                f.write(header + (content or ""))
+            logger.info(f"✅ Saved citation locally to {local_file}")
+        except Exception as e:
+            logger.error(f"❌ Failed to save citation locally: {e}")
+        
+        # Also save to S3 if bucket is configured
+        if not self.bucket:
+            logger.warning("⚠️ No S3_BUCKET set; saved locally only.")
+            return local_file
+            
+        key = f"{self.prefix}citation_{idx}.md"
         try:
             self.client.put_object(
                 Bucket=self.bucket,
@@ -301,16 +597,33 @@ class S3Results:
         except Exception as e:
             logger.error(f"❌ Failed to save citation to S3: {e}")
             logger.error(traceback.format_exc())
-            return None
+            return local_file
 
     def save_citations_json(self, urls: List[str]) -> Optional[str]:
         """Save citations.json with simple format for adhoc-results to read"""
-        if not self.bucket:
-            return None
-        key = f"{self.prefix}citations.json"
+        # Create local results directory with S3 structure
+        results_dir = f"results/{self.prefix}"
+        os.makedirs(results_dir, exist_ok=True)
+        
         citations_data = {
             "citations": urls
         }
+        
+        # Save locally with S3 structure
+        local_file = f"{results_dir}citations.json"
+        try:
+            with open(local_file, 'w', encoding='utf-8') as f:
+                json.dump(citations_data, f, indent=2)
+            logger.info(f"✅ Saved citations.json locally to {local_file}")
+        except Exception as e:
+            logger.error(f"❌ Failed to save citations.json locally: {e}")
+        
+        # Also save to S3 if bucket is configured
+        if not self.bucket:
+            logger.warning("⚠️ No S3_BUCKET set; saved locally only.")
+            return local_file
+            
+        key = f"{self.prefix}citations.json"
         try:
             self.client.put_object(
                 Bucket=self.bucket,
@@ -322,11 +635,27 @@ class S3Results:
             return key
         except Exception as e:
             logger.error(f"❌ Failed to save citations.json: {e}")
-            return None
+            return local_file
 
     def save_session_summary(self, meta: Dict[str, Any]) -> Optional[str]:
+        # Create local results directory with S3 structure
+        results_dir = f"results/{self.prefix}"
+        os.makedirs(results_dir, exist_ok=True)
+        
+        # Save locally with S3 structure
+        local_file = f"{results_dir}session_summary.json"
+        try:
+            with open(local_file, 'w', encoding='utf-8') as f:
+                json.dump(meta, f, indent=2, default=str)
+            logger.info(f"✅ Saved session summary locally to {local_file}")
+        except Exception as e:
+            logger.error(f"❌ Failed to save session summary locally: {e}")
+        
+        # Also save to S3 if bucket is configured
         if not self.bucket:
-            return None
+            logger.warning("⚠️ No S3_BUCKET set; saved locally only.")
+            return local_file
+            
         key = f"{self.prefix}session_summary.json"
         try:
             self.client.put_object(
@@ -339,7 +668,7 @@ class S3Results:
             return key
         except Exception as e:
             logger.error(f"❌ Failed to save session summary: {e}")
-            return None
+            return local_file
 
     def list_results(self) -> Dict[str, Any]:
         if not self.bucket:
@@ -361,6 +690,7 @@ class S3Results:
 
 # ========= Config builders (env-driven) =========
 def create_browser_config() -> BrowserConfig:
+    # Use the exact same browser configuration as the working copy.py (Lambda-tested)
     args = [
         "--no-sandbox",
         "--disable-setuid-sandbox",
@@ -433,6 +763,7 @@ def create_dispatcher() -> MemoryAdaptiveDispatcher:
     )
 
 def create_crawler_config() -> CrawlerRunConfig:
+    # Use the exact same crawler configuration as the working copy.py (Lambda-tested)
     page_timeout = _get_env_int("PAGE_TIMEOUT", 30000, min_val=5000, max_val=240000)
     word_thresh = _get_env_int("WORD_COUNT_THRESHOLD", 50, min_val=0, max_val=10000)
     exclude_external = _get_env_str("EXCLUDE_EXTERNAL_LINKS", "true").lower() in ("1", "true", "yes")
@@ -443,6 +774,7 @@ def create_crawler_config() -> CrawlerRunConfig:
         page_timeout=page_timeout,
         exclude_external_links=exclude_external,
     )
+
 
 # ========= Crawl runner =========
 async def run_crawl(urls: List[str], job_id: str, mode: str, query: str, product_id: str = None, 
@@ -460,26 +792,54 @@ async def run_crawl(urls: List[str], job_id: str, mode: str, query: str, product
     dispatcher = create_dispatcher()
 
     try:
-        async with AsyncWebCrawler(config=browser_cfg) as crawler:
-            async for result in await crawler.arun_many(urls=urls, config=crawler_cfg, dispatcher=dispatcher):
-                if result.success:
+        # Separate Reddit URLs from regular URLs
+        reddit_urls = [url for url in urls if is_reddit_url(url)]
+        regular_urls = [url for url in urls if not is_reddit_url(url)]
+        
+        logger.info(f"🔍 Processing {len(reddit_urls)} Reddit URLs and {len(regular_urls)} regular URLs")
+        
+        # Process Reddit URLs with JSON API
+        for reddit_url in reddit_urls:
+            try:
+                logger.info(f"🔄 Processing Reddit URL: {reddit_url}")
+                reddit_content = await crawl_reddit_url(reddit_url)
+                if reddit_content:
                     successes += 1
-                    md = ""
-                    if getattr(result, "markdown", None):
-                        md = getattr(result.markdown, "raw_markdown", "") or str(result.markdown) or ""
-                    if not md:
-                        md = getattr(result, "cleaned_html", "") or getattr(result, "html", "") or ""
-                    s3_key = s3.save_citation_markdown(md, successes)
+                    s3_key = s3.save_citation_markdown(reddit_content, successes)
                     if s3_key:
                         saved_files.append(s3_key)
-                    logger.info(f"✅ SUCCESS {successes}: {result.url} ({len(md)} chars)")
-                    if successes % 3 == 0:
-                        gc.collect()
-                        logger.info(f"🧹 Memory used: {psutil.virtual_memory().percent}%")
+                    logger.info(f"✅ REDDIT SUCCESS {successes}: {reddit_url} ({len(reddit_content)} chars)")
                 else:
                     failures += 1
-                    failed.append({"url": result.url, "error": result.error_message})
-                    logger.warning(f"❌ FAIL {failures}: {result.url} -> {result.error_message}")
+                    failed.append({"url": reddit_url, "error": "Failed to fetch Reddit JSON content"})
+                    logger.warning(f"❌ REDDIT FAIL {failures}: {reddit_url} -> Failed to fetch JSON content")
+            except Exception as e:
+                failures += 1
+                failed.append({"url": reddit_url, "error": str(e)})
+                logger.error(f"❌ REDDIT ERROR {failures}: {reddit_url} -> {e}")
+        
+        # Process regular URLs with crawl4ai
+        if regular_urls:
+            async with AsyncWebCrawler(config=browser_cfg) as crawler:
+                async for result in await crawler.arun_many(urls=regular_urls, config=crawler_cfg, dispatcher=dispatcher):
+                    if result.success:
+                        successes += 1
+                        md = ""
+                        if getattr(result, "markdown", None):
+                            md = getattr(result.markdown, "raw_markdown", "") or str(result.markdown) or ""
+                        if not md:
+                            md = getattr(result, "cleaned_html", "") or getattr(result, "html", "") or ""
+                        s3_key = s3.save_citation_markdown(md, successes)
+                        if s3_key:
+                            saved_files.append(s3_key)
+                        logger.info(f"✅ SUCCESS {successes}: {result.url} ({len(md)} chars)")
+                        if successes % 3 == 0:
+                            gc.collect()
+                            logger.info(f"🧹 Memory used: {psutil.virtual_memory().percent}%")
+                    else:
+                        failures += 1
+                        failed.append({"url": result.url, "error": result.error_message})
+                        logger.warning(f"❌ FAIL {failures}: {result.url} -> {result.error_message}")
     except Exception as e:
         logger.error(f"💥 Critical crawl error: {e}")
         logger.error(traceback.format_exc())
@@ -539,6 +899,21 @@ async def run_crawl(urls: List[str], job_id: str, mode: str, query: str, product
         },
     }
 
+def filter_youtube_urls(urls: List[str]) -> List[str]:
+    """Filter out YouTube URLs as they're not suitable for crawling"""
+    filtered_urls = []
+    for url in urls:
+        if 'youtube.com' not in url.lower() and 'youtu.be' not in url.lower():
+            filtered_urls.append(url)
+    
+    removed_count = len(urls) - len(filtered_urls)
+    if removed_count > 0:
+        logger.info(f"🚫 Removed {removed_count} YouTube URLs from crawling list")
+    else:
+        logger.info(f"✅ No YouTube URLs found in {len(urls)} URLs")
+    
+    return filtered_urls
+
 # ========= Lambda handler =========
 def lambda_handler(event, context):
     logger.info("🚀 Crawler Lambda handler started")
@@ -577,19 +952,44 @@ def lambda_handler(event, context):
         product_id = event.get('product_id')  # Extract product_id from event
         brand_name = event.get('brand_name')  # Extract brand_name from event
         product_name = event.get('product_name')  # Extract product_name from event
-        session_id = event.get('session_id')  # NEW: Extract session_id from event
+        session_id = event.get('session_id')  # Extract session_id from event
+        root_url = event.get('root_url') or event.get('url')  # For URL discovery
 
+        # If no URLs provided, try to discover them from root_url
         if not urls or not isinstance(urls, list) or len(urls) == 0:
-            return {
-                "statusCode": 400,
-                "headers": {"Content-Type": "application/json"},
-                "body": json.dumps({"error": "Provide 'urls' or 'urls_to_crawl' as a non-empty list", "job_id": job_id}),
-            }
-
-        # Filter out YouTube URLs and validate/deduplicate URLs
-        urls = filter_youtube_urls(urls)
-        logger.info(f"🔍 After YouTube filtering: {len(urls)} URLs remaining")
+            if root_url:
+                logger.info(f"🔍 No URLs provided, discovering from root: {root_url}")
+                try:
+                    urls = asyncio.run(discover_urls_for_parallel_crawl(root_url))
+                    if not urls:
+                        return {
+                            "statusCode": 400,
+                            "headers": {"Content-Type": "application/json"},
+                            "body": json.dumps({"error": "Failed to discover URLs from root_url", "job_id": job_id}),
+                        }
+                    logger.info(f"✅ Discovered {len(urls)} URLs for crawling")
+                except Exception as e:
+                    logger.error(f"❌ URL discovery failed: {e}")
+                    return {
+                        "statusCode": 500,
+                        "headers": {"Content-Type": "application/json"},
+                        "body": json.dumps({"error": f"URL discovery failed: {str(e)}", "job_id": job_id}),
+                    }
+            else:
+                return {
+                    "statusCode": 400,
+                    "headers": {"Content-Type": "application/json"},
+                    "body": json.dumps({"error": "Provide 'urls', 'urls_to_crawl', or 'root_url' for discovery", "job_id": job_id}),
+                }
         
+        # Filter out YouTube URLs
+        urls = filter_youtube_urls(urls)
+        
+        # Validate and deduplicate URLs if we have a root_url for domain validation
+        if root_url:
+            domain = get_domain_name(root_url)
+            urls = validate_and_deduplicate_urls(urls, domain)
+
         results = asyncio.run(
             run_crawl(urls=urls, job_id=job_id, mode=mode, query=query, product_id=product_id,
                      brand_name=brand_name, product_name=product_name, session_id=session_id)
@@ -624,16 +1024,22 @@ if __name__ == "__main__":
     # If environment variables aren't set, the defaults in the getter functions will be used
 
     test_event = {
+        # Option 1: Provide specific URLs (Reddit test)
         "urls": [
-            "https://www.gap.com/",
-            "https://www2.hm.com/en_in/kids/shop-by-product/clothing.html",
+            "https://www.reddit.com/r/AWSCertifications/comments/1loonak/passed_the_aws_saa_with_861_my_thoughts/",
+            "https://www.reddit.com/r/india/comments/uanza0/what_are_some_good_quality_and_affordable_daily",
+            "https://www.reddit.com/r/wicked_edge/comments/196xu35/best_premium_brand",
+            "https://www.reddit.com/r/Frugal/comments/6byzuv/male_groominghygiene_products_best_bangforbuck",
+            "https://www.reddit.com/r/frugalmalefashion/comments/a60gnc/male_grooming_products"
         ],
-        "job_id": "local-test",
-        "mode": "gpt",
-        "query": "which is best skincare brands in USA?",
-        "product_id": "test-product-123",
-        "brand_name": "Test Brand",
-        "product_name": "Test Product",
+        # Option 2: Provide root_url for discovery (uncomment to test discovery)
+        # "root_url": "https://docs.crawl4ai.com/",
+        "job_id": "test-reddit-aws-789",
+        "mode": "pplx",
+        "query": "AWS SAA certification Reddit discussions and search results",
+        "product_id": "reddit-aws-123",
+        "brand_name": "Reddit",
+        "product_name": "AWS Certification Discussion",
         "session_id": "test-session-123"
     }
 
